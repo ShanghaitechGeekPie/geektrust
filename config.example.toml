@@ -1,0 +1,47 @@
+# geekTrust 配置示例
+# 复制为 config.toml 后按需修改；命令行可用 -config 指定路径。
+
+# ---- 登录 ----
+# passkey 凭据文件(由 shanghaitech-ids-passkey 的 bind 命令生成)。
+keystore = "./ids-passkey.keystore"
+
+# 持久化设备标识(32 位大写十六进制)。首次登录需一次短信验证,此后成为受信设备;
+# 一经使用请勿更改,否则服务器视为新设备、再次要求短信验证。
+# 默认值 = MD5("atrust-headless-client-v1").upper()。
+device_id = "84B5B45FE73EC0036C3E97717308447F"
+
+# ---- 控制器 ----
+base_url = "https://vpn.shanghaitech.edu.cn"
+platform = "Mac"            # 大小写敏感,必须为 Mac
+
+# 默认每连接认证使用的 appId(电子资源)。域名命中 appList 时优先使用应用自身的 appId。
+app_id = "681165d0-1c77-11ed-8650-cd35a51aa42a"
+
+# ---- 网关线路 ----
+# 留空 = 从上游 clientResource 自动获取(nodeGroup 地址);
+# 填写则使用自定义网关(格式 host:port,默认端口 441)。
+gateways = []
+# gateways = ["119.78.254.241:441", "59.78.171.241:441"]
+
+# ---- DNS ----
+# 可选:解析网关域名与 inbound 域名回退解析使用的 DNS 服务器(仅 IP,端口默认 53)。
+# 留空 = 使用系统 DNS。
+dns = []
+# dns = ["223.5.5.5", "119.29.29.29"]
+
+# ---- 状态持久化 ----
+# 加密的会话凭据文件(AES-256-GCM;密钥为同目录自动生成的 <state_file>.key,权限 0600)。
+state_file = "./state.enc"
+
+# ---- 代理入口 ----
+[inbound.socks5]
+enabled = true
+listen = "127.0.0.1:1080"
+
+[inbound.http]
+enabled = true
+listen = "127.0.0.1:8080"
+
+# ---- 日志 ----
+# debug / info / warn / error
+log_level = "info"

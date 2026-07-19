@@ -1,0 +1,15 @@
+.agent
+
+# build output
+/geektrust
+/dist/
+
+# runtime state & secrets
+*.keystore
+/state.enc
+/state.enc.key
+/config.toml
+
+# misc
+*.log
+.DS_Store
