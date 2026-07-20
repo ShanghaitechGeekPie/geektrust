@@ -15,7 +15,7 @@
 5. [隧道建立](#5-隧道建立)
 6. [每连接认证](#6-每连接认证)
 7. [数据面](#7-数据面)
-8. [用户态 TCP 端点](#8-用户态-tcp-端点)
+8. [用户态 TCP/UDP 端点](#8-用户态-tcpudp-端点)
 9. [代理入口(SOCKS5/HTTP)](#9-代理入口socks5http)
 10. [密码学与签名参考](#10-密码学与签名参考)
 11. [状态码与错误码总表](#11-状态码与错误码总表)
@@ -43,10 +43,11 @@
 设计要点:
 
 - **不创建系统虚拟网卡、不修改路由表、不需要 root**。所有流量从本地 SOCKS5/HTTP 代理入口进入,
-  按 aTrust 的「每连接认证」模型,将每条 TCP 连接映射为隧道内一个独立的 conntrack,
-  以用户态 TCP 端点的方式在隧道内重建,再封装为 IPv4 包经数据帧转发。
-- **模块解耦**:代理入口(SOCKS5/HTTP inbound)与隧道传输(aTrust outbound)之间通过一个抽象的
-  「TCP 连接工厂」接口隔离;登录/配置模块独立产出「会话凭据」,隧道模块只消费会话凭据,二者不互相依赖。
+  按 aTrust 的「每连接认证」模型,将每条 TCP/UDP 流映射为隧道内独立 conntrack,
+  以 gVisor 用户态 IPv4 endpoint 重建,再封装为 IPv4 包经数据帧转发。
+- **模块解耦**:代理入口(SOCKS5/HTTP inbound)与隧道传输(aTrust outbound)之间通过
+  TCP/UDP Dialer 和 Resolver 接口隔离;登录/配置模块独立产出会话凭据,
+  隧道模块只消费会话凭据。
 - 控制面(登录、配置)走标准 HTTPS/JSON;数据面走网关 441 端口上的 TLS,承载自定义二进制帧(版本号 `0x05`)。
 
 ---
@@ -536,24 +537,29 @@ SOCKS5 UDP ASSOCIATE。配置中的 `dns` 可覆盖上游下发值。
 
 ### 7.3 IPv4 包结构
 
-标准 IPv4 头(20 字节,IHL=5)+ TCP 段。参考实现构造:
+上行和下行都承载标准 IPv4 包:
 
-- IP 头:`version/IHL=0x45`、total length、`id=0x1234`、`flags/frag=0x4000`(DF)、`TTL=64`、`protocol=6`、头校验和、`src=VIP`、`dst=目标IP`。
-- TCP 段:源/目的端口、seq/ack、data offset=5、flags、window=65535、TCP 校验和(含伪首部)。
-- 上行包源地址为 VIP(网关据此匹配 conntrack);单包过大(>1500B)由网关侧处理分片。
+- TCP:IPv4 头的 `protocol=6`,后接标准 TCP 段。
+- UDP:IPv4 头的 `protocol=17`,后接标准 UDP 头和一整个数据报载荷。
+- 上行源地址为 VIP,网关据此匹配 conntrack;每个 TCP/UDP 流使用独立的
+  VIP 源端口和 connectToken。
+
+Go 实现把包注入共享 gVisor link endpoint,按 IPv4 protocol 与目的端口分发到
+TCP 或 UDP endpoint。隧道 MTU 为 1400;UDP 入口把 payload 限制为
+`1400 - 20(IPv4) - 8(UDP) = 1372` 字节,避免生成 IP 分片。
 
 ### 7.4 下行分发
 
-Go 实现的 reader 把包注入共享 gVisor link endpoint,由完整 TCP 栈按四元组分发;
-Python 参考实现则按 TCP 目的端口路由到对应 `TCPConn`。
+Go reader 按 §7.2 拆出完整 IPv4 包后,通过 protocol 和 VIP 目的端口找到
+对应 gVisor endpoint;Python 参考实现只包含 TCP 端点。
 
 ---
 
-## 8. 用户态 TCP 端点
+## 8. 用户态 TCP/UDP 端点
 
-数据面承载的是完整 IPv4/TCP 包,因此客户端必须提供用户态 TCP 状态机。
-Python 参考实现 `TCPConn` 只覆盖下述最小行为;geekTrust 的 Go 实现使用 gVisor
-完整 TCP 栈,额外具备重传、拥塞/流量控制、窗口缩放、SACK 和 TIME_WAIT。
+数据面承载完整 IPv4/TCP 或 IPv4/UDP 包。Python 参考实现 `TCPConn` 只覆盖
+下述最小 TCP 行为;geekTrust 的 Go 实现使用 gVisor IPv4/TCP/UDP 栈,
+额外具备完整 TCP 状态机和保持数据报边界的 connected UDP endpoint。
 
 ### 8.1 连接建立(三次握手)
 
@@ -582,26 +588,68 @@ Python 参考实现 `TCPConn` 只覆盖下述最小行为;geekTrust 的 Go 实�
 
 发送 FIN+ACK(`flags=0x11`),`my_seq += 1`,标记关闭并注销 conntrack。
 
+### 8.5 用户态 UDP endpoint
+
+Go 实现为每个 UDP 目标建立 connected gVisor UDP endpoint。入口写入的每次
+`Write` 对应一个 UDP 数据报,下行每次 `Read` 也保留数据报边界。隧道断开会
+销毁 endpoint;下一次入口写入按同一目标重新解析、认证并建立 flow。
+
 ---
 
 ## 9. 代理入口(SOCKS5/HTTP)
 
-参考实现 `atrust_socks5.py` 提供 SOCKS5 入口(HTTP CONNECT 入口同构,见 PLAN.md):
+Go 实现提供 SOCKS5 CONNECT/UDP ASSOCIATE 和 HTTP/1.1
+CONNECT/CONNECT-UDP;Python 参考实现只提供 SOCKS5 CONNECT。
 
-### 9.1 SOCKS5 握手
+### 9.1 SOCKS5 CONNECT
 
 1. 客户端发 `0x05 <nmethods> <methods>`;服务器回 `0x05 0x00`(无认证)。
-2. 客户端发请求 `0x05 <cmd> 0x00 <atyp> <dst.addr> <dst.port>`:
-   - `cmd=0x01`(CONNECT;不支持的命令回 `0x05 0x07 …`)。
-   - `atyp`:`0x01`=IPv4(4 字节)、`0x03`=域名(1 字节长度+域名)、`0x04`=IPv6(16 字节);**不支持的 atyp 回 `0x05 0x08 …`**。
-3. 按 §4.2 选择目标 IP、`appId` 和可选域名;无法解析时回 `0x05 0x04 …`(host unreachable)。
-4. 通过隧道建立 TCP 连接(§6+§8,失败重试,见 §12),成功后回 `0x05 0x00 0x00 0x01 0.0.0.0:0`。
-5. 双向中继:客户端↔隧道 TCP 端点。Go 实现用 32 KiB 缓冲双向复制;一侧 EOF 时发送
-   TCP 半关闭并继续反向中继;反向流连续空闲 30 秒才强制关闭。Python 参考实现则在任一方向结束时关闭。
+2. 客户端发 `0x05 0x01 0x00 <atyp> <dst.addr> <dst.port>`。
+3. 按 §4.2 选择目标 IP、TCP `appId` 和可选域名;无法解析时回
+   `REP=0x04`,拨号失败回 `REP=0x05`。
+4. 成功后回 `REP=0x00`,再进行支持半关闭的双向 TCP 中继。
 
-### 9.2 解耦
+### 9.2 SOCKS5 UDP ASSOCIATE(RFC 1928)
 
-- SOCKS5/HTTP 入口只依赖「`dial(dst_ip, dst_port, app_id, domain) -> 双向字节流`」接口,不感知 aTrust 帧格式或用户态 TCP。
+客户端在同一握手后发送 `CMD=0x03`;服务器绑定临时 UDP socket,在成功响应的
+`BND.ADDR:BND.PORT` 返回该地址。关联在 TCP 控制连接关闭时终止。服务器只接受
+来自控制连接对端 IP 的数据报;请求端口非零时同时固定源端口,否则以第一份合法
+数据报的源端口为准。
+
+UDP 请求与响应格式:
+
+```
+RSV(0x0000) | FRAG | ATYP | DST.ADDR | DST.PORT | UDP payload
+```
+
+- 支持 IPv4 和域名目标;隧道数据面不支持 IPv6 目标。
+- `FRAG != 0` 时静默丢弃;本实现不支持 SOCKS5 UDP 分片。
+- 每个目标独立执行 UDP Resolver 策略匹配和 §6 `ip.protocol=17` 认证。
+- 每个关联最多保留 64 个目标 flow;空闲 5 分钟回收,后续数据报可透明重建。
+
+### 9.3 HTTP/1.1 CONNECT-UDP(RFC 9298 / RFC 9297)
+
+服务端提供默认 URI Template:
+
+```
+http://<proxy>/.well-known/masque/udp/{target_host}/{target_port}/
+```
+
+请求使用 `GET`,并携带 `Connection: Upgrade`、`Upgrade: connect-udp` 和
+`Capsule-Protocol: ?1`;成功响应为 `101 Switching Protocols`,包含相同
+Upgrade token 和 `Capsule-Protocol: ?1`。升级后的数据流是 Capsule Protocol:
+
+```
+DATAGRAM Capsule = Type(varint=0) | Length(varint) | Context ID(varint=0) | UDP payload
+```
+
+未知 Capsule Type 和非零 Context ID 被跳过。超过 1372 字节、会触发 IPv4
+分片的 UDP payload 按 RFC 9298 静默丢弃。当前 HTTP listener 实现 HTTP/1.1;
+HTTP/2 Extended CONNECT 和 HTTP/3 QUIC DATAGRAM 不在当前入口范围。
+
+### 9.4 解耦
+
+- SOCKS5/HTTP 入口只依赖 `Dial`/`DialUDP` 和 `Resolve`/`ResolveUDP` 接口。
 - 隧道模块只消费会话凭据和解析后的目标,不感知入口协议。
 - 登录/配置模块独立产出并持久化会话凭据,供隧道和 Resolver 复用。
 
@@ -732,7 +780,7 @@ X-Request-Sig = LOWER_HEX( HMAC-SHA256( hex_decode(signKey), pathWithQuery + bod
 | 文件 | 职责 | 对应章节 |
 |---|---|---|
 | `src/atrust_crypto.py` | signKey / encryptedChallenge / RSA 加密 | §10.1 §10.2 |
-| `src/atrust_l3.py` | L3 隧道(TLS 接入、隧道认证、心跳、帧收发)+ 用户态 TCP 端点(握手/重组/中继) | §5 §6 §7 §8 |
+| `src/atrust_l3.py` | L3 隧道(TLS 接入、隧道认证、心跳、帧收发)+ 用户态 TCP 端点(握手/重组/中继) | §5 §6 §7 §8(TCP 参考) |
 | `src/atrust_socks5.py` | clientResource 拉取、域名映射、SOCKS5 入口、双向中继 | §4 §9 |
 | `third_party/shanghaitech-ids-passkey/` | IDS passkey 免密登录(keystore) | §3.1 |
 

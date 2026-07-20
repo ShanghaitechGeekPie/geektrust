@@ -69,15 +69,21 @@ type Resolution struct {
 	Domain string
 }
 
-// Resolve returns the tunnel target for host:port. Order: IP literal →
-// exact domain rule → DNS + IP-policy match → TLD suffix fallback.
-//
-// The IP-policy match carries no domain: the gateway checks the destAddr
-// against the app's address ranges. The suffix fallback does carry the
-// domain: wildcard ("*.com") entries are matched against the auth
-// request's domain field, and the gateway cross-checks the destAddr
-// against its own resolution of that domain.
+// Resolve returns the TCP tunnel target for host:port.
 func (r *Resolver) Resolve(ctx context.Context, host string, port int) (Resolution, error) {
+	return r.resolve(ctx, host, port, "tcp")
+}
+
+// ResolveUDP returns the UDP tunnel target for host:port.
+func (r *Resolver) ResolveUDP(ctx context.Context, host string, port int) (Resolution, error) {
+	return r.resolve(ctx, host, port, "udp")
+}
+
+// resolve uses this order: IP literal → exact domain rule → DNS + IP-policy
+// match → TLD suffix fallback. IP-policy matches carry no domain because the
+// gateway checks destAddr. Wildcard matches carry the original domain because
+// the gateway checks that field against its own DNS result.
+func (r *Resolver) resolve(ctx context.Context, host string, port int, protocol string) (Resolution, error) {
 	cred, err := r.provider.Credential(ctx)
 	if err != nil {
 		return Resolution{}, err
@@ -91,9 +97,12 @@ func (r *Resolver) Resolve(ctx context.Context, host string, port int) (Resoluti
 		if v4 == nil {
 			return Resolution{}, fmt.Errorf("%w: %s: IPv6 targets are not supported", ErrUnresolvable, host)
 		}
-		return Resolution{IP: v4.String(), AppID: cred.Policy.AppIDFor(v4, port, cred.AppID)}, nil
+		return Resolution{
+			IP:    v4.String(),
+			AppID: cred.Policy.AppIDForProtocol(v4, port, cred.AppID, protocol),
+		}, nil
 	}
-	if rule, ok := cred.Policy.MatchDomain(host, port); ok {
+	if rule, ok := cred.Policy.MatchDomainProtocol(host, port, protocol); ok {
 		if isGatewayTarget(cred, host, net.ParseIP(rule.IP), port) {
 			return Resolution{}, fmt.Errorf("%w: %s", ErrGatewayLoop, net.JoinHostPort(host, strconv.Itoa(port)))
 		}
@@ -107,14 +116,14 @@ func (r *Resolver) Resolve(ctx context.Context, host string, port int) (Resoluti
 	if isGatewayTarget(cred, host, v4, port) {
 		return Resolution{}, fmt.Errorf("%w: %s", ErrGatewayLoop, net.JoinHostPort(host, strconv.Itoa(port)))
 	}
-	return routeDNSResult(cred, host, port, v4), nil
+	return routeDNSResult(cred, host, port, v4, protocol), nil
 }
 
-func routeDNSResult(cred *session.Credential, host string, port int, v4 net.IP) Resolution {
-	if rule, ok := cred.Policy.MatchIP(v4, port); ok {
+func routeDNSResult(cred *session.Credential, host string, port int, v4 net.IP, protocol string) Resolution {
+	if rule, ok := cred.Policy.MatchIPProtocol(v4, port, protocol); ok {
 		return Resolution{IP: v4.String(), AppID: rule.AppID}
 	}
-	if rule, ok := cred.Policy.MatchSuffix(host, port); ok {
+	if rule, ok := cred.Policy.MatchSuffixProtocol(host, port, protocol); ok {
 		return Resolution{IP: v4.String(), AppID: rule.AppID, Domain: host}
 	}
 	return Resolution{IP: v4.String(), AppID: cred.AppID}
@@ -169,11 +178,15 @@ func (r *Resolver) tunnelResolver(cred *session.Credential, server string) *net.
 			if ip == nil {
 				return nil, fmt.Errorf("invalid tunnel DNS server %q", server)
 			}
+			protocol := "udp"
+			if network == "tcp" || network == "tcp4" {
+				protocol = "tcp"
+			}
 			appID := cred.AppID
 			if cred.Policy != nil {
-				appID = cred.Policy.AppIDFor(ip, 53, appID)
+				appID = cred.Policy.AppIDForProtocol(ip, 53, appID, protocol)
 			}
-			if network == "tcp" || network == "tcp4" {
+			if protocol == "tcp" {
 				return r.tunnel.Dial(ctx, ip.String(), 53, appID, "")
 			}
 			return r.tunnel.DialUDP(ctx, ip.String(), 53, appID, "")

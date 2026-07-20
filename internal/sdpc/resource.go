@@ -63,16 +63,21 @@ func (r PortRange) Contains(port int) bool { return port >= r.Min && port <= r.M
 
 func allPorts() PortRange { return PortRange{0, 65535} }
 
-// MatchDomain returns the rule authorizing domain:port (TCP). When several
-// rules cover the port, the narrowest port range wins (an app authorizing
-// exactly 443 beats a catch-all 0-65535 entry); ties keep appList order.
+// MatchDomain returns the TCP rule authorizing domain:port.
 func (r *Resource) MatchDomain(domain string, port int) (DomainRule, bool) {
+	return r.MatchDomainProtocol(domain, port, "tcp")
+}
+
+// MatchDomainProtocol returns the rule authorizing domain:port for protocol.
+// When several rules cover the port, the narrowest port range wins; ties keep
+// appList order.
+func (r *Resource) MatchDomainProtocol(domain string, port int, protocol string) (DomainRule, bool) {
 	domain = normalizeHost(domain)
 	var best DomainRule
 	bestWidth := 1 << 30
 	found := false
 	for _, rule := range r.DomainRules {
-		if rule.Domain != domain || !rule.Port.Contains(port) || !tcpCompatible(rule.Proto) {
+		if rule.Domain != domain || !rule.Port.Contains(port) || !protocolCompatible(rule.Proto, protocol) {
 			continue
 		}
 		if width := rule.Port.Max - rule.Port.Min; !found || width < bestWidth {
@@ -82,14 +87,19 @@ func (r *Resource) MatchDomain(domain string, port int) (DomainRule, bool) {
 	return best, found
 }
 
-// MatchSuffix returns the rule whose TLD wildcard covers host:port (TCP).
-// The longest suffix wins; ties keep appList order.
+// MatchSuffix returns the TCP rule whose TLD wildcard covers host:port.
 func (r *Resource) MatchSuffix(host string, port int) (SuffixRule, bool) {
+	return r.MatchSuffixProtocol(host, port, "tcp")
+}
+
+// MatchSuffixProtocol returns the rule whose TLD wildcard covers host:port
+// for protocol. The longest suffix wins; ties keep appList order.
+func (r *Resource) MatchSuffixProtocol(host string, port int, protocol string) (SuffixRule, bool) {
 	host = normalizeHost(host)
 	var best SuffixRule
 	found := false
 	for _, rule := range r.SuffixRules {
-		if !strings.HasSuffix(host, rule.Suffix) || !rule.Port.Contains(port) || !tcpCompatible(rule.Proto) {
+		if !strings.HasSuffix(host, rule.Suffix) || !rule.Port.Contains(port) || !protocolCompatible(rule.Proto, protocol) {
 			continue
 		}
 		if !found || len(rule.Suffix) > len(best.Suffix) {
@@ -104,11 +114,15 @@ func normalizeHost(host string) string {
 	return strings.TrimSuffix(strings.ToLower(host), ".")
 }
 
-// MatchIP returns the most specific rule authorizing ip:port (TCP).
-// Exact addresses win. CIDRs and ranges are compared by the number of
-// addresses they cover, so a 10/8 range beats a /0 catch-all while a /16
-// beats that range. Ties keep appList order.
+// MatchIP returns the most specific TCP rule authorizing ip:port.
 func (r *Resource) MatchIP(ip net.IP, port int) (IPRule, bool) {
+	return r.MatchIPProtocol(ip, port, "tcp")
+}
+
+// MatchIPProtocol returns the most specific rule authorizing ip:port for
+// protocol. Exact addresses win. CIDRs and ranges are compared by the number
+// of addresses they cover; ties keep appList order.
+func (r *Resource) MatchIPProtocol(ip net.IP, port int, protocol string) (IPRule, bool) {
 	ip4 := ip.To4()
 	if ip4 == nil {
 		return IPRule{}, false
@@ -118,7 +132,7 @@ func (r *Resource) MatchIP(ip net.IP, port int) (IPRule, bool) {
 	bestSpan := ^uint64(0)
 	found := false
 	for _, rule := range r.IPRules {
-		if !rule.Port.Contains(port) || !tcpCompatible(rule.Proto) {
+		if !rule.Port.Contains(port) || !protocolCompatible(rule.Proto, protocol) {
 			continue
 		}
 		exact := false
@@ -157,17 +171,22 @@ func ipToU32(ip net.IP) uint32 {
 	return binary.BigEndian.Uint32(v4)
 }
 
-// AppIDFor returns the appId authorizing ip:port, or fallback when no rule
-// matches.
+// AppIDFor returns the TCP appId authorizing ip:port, or fallback.
 func (r *Resource) AppIDFor(ip net.IP, port int, fallback string) string {
-	if rule, ok := r.MatchIP(ip, port); ok {
+	return r.AppIDForProtocol(ip, port, fallback, "tcp")
+}
+
+// AppIDForProtocol returns the appId authorizing ip:port for protocol, or
+// fallback when no rule matches.
+func (r *Resource) AppIDForProtocol(ip net.IP, port int, fallback, protocol string) string {
+	if rule, ok := r.MatchIPProtocol(ip, port, protocol); ok {
 		return rule.AppID
 	}
 	return fallback
 }
 
-func tcpCompatible(proto string) bool {
-	return proto == "" || proto == "tcp" || proto == "all"
+func protocolCompatible(rule, requested string) bool {
+	return rule == "" || rule == "all" || rule == requested
 }
 
 // clientResource mirrors the response parts geekTrust consumes. Decoding is

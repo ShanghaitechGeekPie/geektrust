@@ -1,5 +1,5 @@
-// Package inbound exposes the tunnel as local SOCKS5 and HTTP CONNECT
-// proxies. It depends only on the Dialer and Resolver contracts, never on
+// Package inbound exposes TCP and UDP tunnel flows through local SOCKS5 and
+// HTTP proxies. It depends only on Dialer and Resolver contracts, never on
 // aTrust internals.
 package inbound
 
@@ -25,21 +25,21 @@ const (
 	halfCloseTimeout = 30 * time.Second
 )
 
-// Dialer establishes a TCP connection through the tunnel to an
-// already-resolved IP under the given authorizing app. Implemented by
-// l3.Dialer.
+// Dialer establishes connections through the tunnel to already-resolved IPs
+// under the given authorizing app. Implemented by l3.Dialer.
 type Dialer interface {
 	Dial(ctx context.Context, ip string, port int, appID, domain string) (net.Conn, error)
+	DialUDP(ctx context.Context, ip string, port int, appID, domain string) (net.Conn, error)
 }
 
-// Resolver maps a target host to a tunnel target (IP, authorizing appId,
-// and the domain for wildcard-authorized dials). Implemented by
-// resolver.Resolver.
+// Resolver maps target hosts to tunnel targets (IP, authorizing appId, and
+// the domain for wildcard-authorized dials). Implemented by resolver.Resolver.
 type Resolver interface {
 	Resolve(ctx context.Context, host string, port int) (resolver.Resolution, error)
+	ResolveUDP(ctx context.Context, host string, port int) (resolver.Resolution, error)
 }
 
-// Server runs the SOCKS5 and HTTP CONNECT listeners.
+// Server runs the SOCKS5 and HTTP proxy listeners.
 type Server struct {
 	cfg      config.Inbound
 	resolver Resolver
@@ -158,6 +158,22 @@ func (s *Server) track(c net.Conn, add bool) {
 		delete(s.conns, c)
 	}
 	s.mu.Unlock()
+}
+
+func writeAll(w io.Writer, data []byte) error {
+	for len(data) != 0 {
+		n, err := w.Write(data)
+		if n > 0 {
+			data = data[n:]
+		}
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return io.ErrNoProgress
+		}
+	}
+	return nil
 }
 
 var relayBuffers = sync.Pool{New: func() any {

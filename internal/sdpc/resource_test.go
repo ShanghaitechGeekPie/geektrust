@@ -201,6 +201,39 @@ func TestSuffixRules(t *testing.T) {
 	}
 }
 
+func TestProtocolSpecificRules(t *testing.T) {
+	res := &Resource{
+		DomainRules: []DomainRule{
+			{Domain: "service.example", IP: "10.0.0.1", AppID: "tcp-app", Port: allPorts(), Proto: "tcp"},
+			{Domain: "service.example", IP: "10.0.0.2", AppID: "udp-app", Port: allPorts(), Proto: "udp"},
+		},
+		SuffixRules: []SuffixRule{
+			{Suffix: ".example", AppID: "tcp-app", Port: allPorts(), Proto: "tcp"},
+			{Suffix: ".example", AppID: "udp-app", Port: allPorts(), Proto: "udp"},
+		},
+		IPRules: []IPRule{
+			{IP: net.ParseIP("10.0.0.3"), AppID: "tcp-app", Port: allPorts(), Proto: "tcp"},
+			{IP: net.ParseIP("10.0.0.3"), AppID: "udp-app", Port: allPorts(), Proto: "udp"},
+		},
+	}
+
+	if rule, ok := res.MatchDomainProtocol("service.example", 53, "udp"); !ok || rule.AppID != "udp-app" {
+		t.Fatalf("UDP domain rule = %+v, %v", rule, ok)
+	}
+	if rule, ok := res.MatchSuffixProtocol("other.example", 53, "udp"); !ok || rule.AppID != "udp-app" {
+		t.Fatalf("UDP suffix rule = %+v, %v", rule, ok)
+	}
+	if rule, ok := res.MatchIPProtocol(net.ParseIP("10.0.0.3"), 53, "udp"); !ok || rule.AppID != "udp-app" {
+		t.Fatalf("UDP IP rule = %+v, %v", rule, ok)
+	}
+	if got := res.AppIDForProtocol(net.ParseIP("10.0.0.3"), 53, "fallback", "udp"); got != "udp-app" {
+		t.Fatalf("UDP appID = %q", got)
+	}
+	if rule, ok := res.MatchIP(net.ParseIP("10.0.0.3"), 53); !ok || rule.AppID != "tcp-app" {
+		t.Fatalf("TCP compatibility wrapper = %+v, %v", rule, ok)
+	}
+}
+
 func TestGatewaysAndDNS(t *testing.T) {
 	res := parseSample(t)
 

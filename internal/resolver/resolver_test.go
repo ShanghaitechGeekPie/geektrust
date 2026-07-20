@@ -57,19 +57,19 @@ func TestRouteDNSResultPrefersIPPolicy(t *testing.T) {
 	}
 	cred := &session.Credential{Policy: policy, AppID: "fallback-app"}
 
-	got := routeDNSResult(cred, "www.baidu.com", 443, ip)
+	got := routeDNSResult(cred, "www.baidu.com", 443, ip, "tcp")
 	if got.IP != "180.101.49.44" || got.AppID != "ip-app" || got.Domain != "" {
 		t.Fatalf("IP-authorized resolution = %+v", got)
 	}
 
 	policy.IPRules = nil
-	got = routeDNSResult(cred, "www.baidu.com", 443, ip)
+	got = routeDNSResult(cred, "www.baidu.com", 443, ip, "tcp")
 	if got.AppID != "suffix-app" || got.Domain != "www.baidu.com" {
 		t.Fatalf("suffix fallback resolution = %+v", got)
 	}
 
 	policy.SuffixRules = nil
-	got = routeDNSResult(cred, "www.baidu.com", 443, ip)
+	got = routeDNSResult(cred, "www.baidu.com", 443, ip, "tcp")
 	if got.AppID != "fallback-app" || got.Domain != "" {
 		t.Fatalf("default resolution = %+v", got)
 	}
@@ -84,6 +84,29 @@ func (p *staticProvider) Credential(context.Context) (*session.Credential, error
 }
 
 func (*staticProvider) Invalidate() {}
+
+func TestResolveUDPUsesUDPPolicy(t *testing.T) {
+	policy := &sdpc.Resource{IPRules: []sdpc.IPRule{
+		{IP: net.ParseIP("10.0.0.53"), AppID: "tcp-app", Port: sdpc.PortRange{Min: 53, Max: 53}, Proto: "tcp"},
+		{IP: net.ParseIP("10.0.0.53"), AppID: "udp-app", Port: sdpc.PortRange{Min: 53, Max: 53}, Proto: "udp"},
+	}}
+	r := New(&staticProvider{cred: &session.Credential{Policy: policy, AppID: "fallback"}}, nil)
+
+	udp, err := r.ResolveUDP(context.Background(), "10.0.0.53", 53)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if udp.AppID != "udp-app" {
+		t.Fatalf("UDP resolution = %+v", udp)
+	}
+	tcp, err := r.Resolve(context.Background(), "10.0.0.53", 53)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tcp.AppID != "tcp-app" {
+		t.Fatalf("TCP resolution = %+v", tcp)
+	}
+}
 
 type localDNSTunnel struct {
 	server *net.UDPAddr

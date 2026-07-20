@@ -16,10 +16,10 @@ SOCKS5 / HTTP CONNECT 代理暴露给其他程序。协议规格见 [`docs/TECHN
   会话换取。
 - **隧道**:网关 441 端口 TLS 之上承载版本 `0x05` 的二进制帧;一次隧道认证取得
   虚拟 IP(VIP,仅用作数据包的源地址标记)。
-- **数据面**:每条 TCP 连接先做一次「每连接认证」取得 connectToken,再交给 gVisor
-  用户态 TCP/IP 栈处理重传、拥塞控制、流量控制、乱序重组、半关闭和 TIME_WAIT,
-  封装为 IPv4 包经数据帧转发。入口只看到标准 `net.Conn`,不区分 HTTP、TLS、
-  SSH、IMAP 等上层协议。
+- **数据面**:每条 TCP/UDP 流先做一次「每连接认证」取得 connectToken,再交给
+  gVisor 用户态 IPv4 栈处理。TCP 具备重传、拥塞控制、乱序重组、半关闭和
+  TIME_WAIT;UDP 保留数据报边界。完整 IPv4 包经隧道数据帧转发,入口不感知
+  aTrust 帧格式。
 - **保活**:心跳 20s,连续无响应判死,随后指数退避重连(1s→30s);多线路先完成
   TLS 握手再按延迟择优,避免把透明代理回环误判为可用网关;隧道层错误码触发换线;
   会话失效时 passkey 静默重登。
@@ -85,6 +85,18 @@ curl --socks5-hostname 127.0.0.1:1080 https://library.shanghaitech.edu.cn/
 curl -x http://127.0.0.1:8080 https://library.shanghaitech.edu.cn/qbsjk/list.htm
 ```
 
+UDP 有两种标准入口:
+
+- SOCKS5 按 RFC 1928 使用 `UDP ASSOCIATE`(`CMD=0x03`),客户端把 RFC 1928
+  UDP 数据报发往服务器返回的临时 UDP 端口。
+- HTTP/1.1 按 RFC 9298 使用
+  `GET /.well-known/masque/udp/{target_host}/{target_port}/` 和
+  `Upgrade: connect-udp`;UDP 载荷按 RFC 9297 DATAGRAM Capsule 传输,
+  Context ID 为 0。当前 HTTP listener 不提供 HTTP/2 或 HTTP/3。
+
+两种入口都保持 TCP 控制连接/HTTP 升级连接的生命周期,并为每个 UDP 目标独立
+执行解析和 `protocol=17` 每连接认证。
+
 ## 短信验证
 
 新 device_id 首次登录必定触发短信二次验证,无法绕过。之后是否需要短信由服务端
@@ -120,9 +132,10 @@ DNS 先直连 `223.5.5.5`、`119.29.29.29` 和系统解析器,并过滤 Clash �
 
 ## 限制
 
-- 代理入口仅支持 TCP over IPv4。网关接入线路本身可以是 IPv6,但线上隧道认证
+- 代理数据面仅支持 IPv4 目标。网关接入线路本身可以是 IPv6,但线上隧道认证
   分配的是 `addrType=1` IPv4 VIP;因此 IPv6 字面量和仅有 AAAA 的目标无法转发。
-  域名解析器会在隧道内使用 UDP 查询校内 DNS,但 SOCKS5 UDP ASSOCIATE 仍不支持。
+- 隧道 MTU 为 1400;UDP payload 上限为 1372 字节。SOCKS5/CONNECT-UDP 会按
+  RFC 要求静默丢弃需要 IP 分片的超大数据报。
 - 控制面走浏览器路径(clientType=SDPBrowserClient),不计算接口签名。
 
 ## 鸣谢

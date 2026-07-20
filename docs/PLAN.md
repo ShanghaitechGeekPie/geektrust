@@ -24,8 +24,8 @@
   应用程序  ─────►│  inbound 层        Dialer 接口        outbound 层                        │──────► aTrust 网关
  (curl/浏览器)    │  ┌────────────┐   ┌──────────────┐   ┌──────────────────────────────┐    │  TLS(0x05 帧)
   SOCKS5/HTTP    │  │ SOCKS5 服务 │   │              │   │ tunnel: TLS 接入/认证/心跳/重连 │    │
-                 │  │ HTTP CONNECT│──►│  net.Conn    │──►│ l3: 每连接认证 + 用户态 TCP    │    │
-                 │  └────────────┘   │  Dialer      │   │ frame: 0x05 帧编解码          │    │
+                 │  │ HTTP 代理   │──►│net.Conn/UDP  │──►│ l3:每流认证 + gVisor IPv4    │    │
+                 │  └────────────┘   │ Dialer       │   │ frame:0x05 帧编解码          │    │
                  │                    └──────────────┘   └──────────────────────────────┘    │
                  │        ▲                                          ▲                       │
                  │        │                                          │ 会话凭据               │
@@ -50,14 +50,15 @@
 
   ```go
   type Dialer interface {
-      // 建立到 ip:port 的隧道 TCP 连接。appID 来自 Resolver;
+      // 建立到 ip:port 的隧道 TCP 或 connected UDP 流。appID 来自 Resolver;
       // domain 仅用于后缀通配符授权,其他情况为空。
       Dial(ctx context.Context, ip string, port int, appID, domain string) (net.Conn, error)
+      DialUDP(ctx context.Context, ip string, port int, appID, domain string) (net.Conn, error)
   }
   ```
 
-  inbound(SOCKS5/HTTP)只依赖 `Dialer`,不需要了解 aTrust 帧格式或用户态 TCP。
-  单测可注入 mock Dialer,传输实现也能独立替换。
+  inbound(SOCKS5/HTTP)只依赖 `Dialer` 和 `Resolver`,不需要了解 aTrust 帧格式
+  或 gVisor 实现。单测可注入 mock,传输实现也能独立替换。
 - **`CredentialProvider`(登录 ↔ 隧道)**:
 
   ```go
@@ -71,8 +72,8 @@
 - **`Resolver`(目标解析与授权选择)**:从 clientResource 读取精确域名、IP/CIDR/范围和后缀通配符规则。
   域名先查精确映射,再尝试公网/系统 DNS;没有可用 IPv4 时,通过 l3 的内部 UDP
   接口查询上游下发的 split-horizon DNS。解析结果再匹配 IP 规则,最后才用后缀通配符。
-  Resolver 返回 IP、`appId` 以及可选 `domain`。解析失败时,inbound 直接返回 SOCKS5
-  host-unreachable;其他失败按拨号错误处理。
+  `Resolve` 和 `ResolveUDP` 分别按 TCP/UDP protocol 选择 IP、`appId` 以及可选
+  `domain`。解析失败时,inbound 按入口协议返回错误或丢弃数据报。
 
 ---
 
@@ -100,12 +101,13 @@ geektrust/
       tunnel.go                    #   L3Tunnel:连接/认证/VIP/心跳/reader 循环
       line.go                      #   线路探测择优 + 失败切换
       reconnect.go                 #   指数退避重连
-    l3/                            # 每连接认证 + gVisor 用户态 TCP(Dialer 实现)
+    l3/                            # 每流认证 + gVisor IPv4(TCP/UDP Dialer 实现)
       auth.go                      #   authRequestIP 构造、per-conn auth(0x13/0x93)
-      gvisor.go                    #   IPv4 link endpoint、完整 TCP 栈、net.Conn 封装
-    inbound/                       # 代理入口(仅依赖 Dialer)
-      socks5.go                    #   SOCKS5(CONNECT;UDP ASSOCIATE 暂不实现)
-      http.go                      #   HTTP CONNECT
+      gvisor.go                    #   IPv4 link endpoint、TCP/UDP net.Conn 封装
+    inbound/                       # 代理入口(仅依赖 Dialer/Resolver)
+      socks5.go                    #   RFC 1928 CONNECT + UDP ASSOCIATE
+      http.go                      #   HTTP CONNECT + RFC 9298 CONNECT-UDP
+      udp.go                       #   connected UDP flow 表、重建与回收
       server.go                    #   监听/并发/优雅退出
     resolver/                      # 域名→隧道内 IP(Resolver 实现)
     config/                        # 配置加载/状态路径
@@ -177,20 +179,20 @@ docs/
 - **重连**(`reconnect.go`):指数退避(1s→30s 封顶);连续失败用持久化凭据静默重登;
   错误码 `10000002~4`/`99700001` 触发换线。
 
-### 5.2 每连接认证与用户态 TCP 栈(`l3/`)
+### 5.2 每连接认证与用户态 IPv4 栈(`l3/`)
 
 - **authRequestIP**(`auth.go`):严格按 TECHNICAL.md §6.2 构造(字段顺序、`deviceId` 小写、完整 `env`、
   `procHash`=SHA256(path) 的**大写十六进制**,与 `env…fingerprint` 一致、**不含** `appToken`/`rcAppliedInfo`);
-  `xRequestSig` 可置空。后缀通配符兜底时在 `ip` 后加入可选 `domain`。
-- **用户态 TCP 栈**(`gvisor.go`):
-  - 每条活隧道复用一个 gVisor IPv4/TCP stack,自定义 link endpoint 的 MTU 为 1400;
-  - gVisor 负责三次握手、重传、拥塞/流量控制、窗口缩放、SACK、乱序重组和 FIN/RST/TIME_WAIT;
-  - link endpoint 按源端口取得该连接的 connectToken,把完整 IPv4 包封入 0x14 帧;
-    同一 token 的连续包合并进一个多包帧,减少 TLS 与串行 socket write 开销;
-  - 通过 `gonet.TCPConn` 实现标准 `net.Conn` 及 `CloseWrite`,供 inbound 透明转发任意 TCP 上层协议。
+  `xRequestSig` 可置空。TCP/UDP 分别使用 `ip.protocol=6/17`;后缀通配符兜底时在 `ip` 后加入可选 `domain`。
+- **用户态 IPv4 栈**(`gvisor.go`):
+  - 每条活隧道复用一个 gVisor IPv4/TCP/UDP stack,自定义 link endpoint 的 MTU 为 1400;
+  - TCP 由 gVisor 负责握手、重传、拥塞/流量控制、SACK、乱序重组和 FIN/RST/TIME_WAIT;
+  - UDP 使用 connected endpoint 保留数据报边界,payload 上限 1372 字节以避免 IP 分片;
+  - link endpoint 按 protocol/源端口取得 connectToken,把完整 IPv4 包封入 0x14 帧;
+    同一 token 的连续包合并进一个多包帧,减少 TLS 与串行 socket write 开销。
 - **Dialer 实现**:`l3` 接收已解析的 IP、端口、`appId` 和可选域名:
-  原子保留源端口/下行路由 → per-conn auth 取 connectToken(失败退避重试,见 §6.1)→
-  用固定 VIP:srcPort 建立 gVisor TCP 连接 → 返回 `net.Conn`。
+  原子保留源端口/下行路由 → per-conn auth 取 connectToken → 建立固定
+  VIP:srcPort 的 gVisor TCP 或 UDP endpoint → 返回 `net.Conn`。
 
 ---
 
@@ -225,13 +227,17 @@ docs/
 
 ---
 
-## 7. 代理入口(`inbound/`,仅依赖 Dialer)
+## 7. 代理入口(`inbound/`,仅依赖 Dialer/Resolver)
 
-- **SOCKS5**(`socks5.go`):`127.0.0.1:1080`,支持 CONNECT(TECHNICAL.md §9.1)。UDP ASSOCIATE 暂不实现
-  (TECHNICAL.md 仅给出 `ip.protocol=17` 的 UDP 每连接认证字段,UDP 数据帧/中继规格待补充后再议)。
-- **HTTP CONNECT**(`http.go`):`127.0.0.1:8080`。
-- **无认证**(可配置开启);Resolver 为目标选择 IP、`appId` 和可选域名。
-- inbound 通过 `Dialer` 接口建立连接,与隧道完全解耦,可独立单测(mock Dialer)。
+- **SOCKS5**(`socks5.go`):`127.0.0.1:1080`,支持 RFC 1928 CONNECT 和
+  UDP ASSOCIATE。UDP 关联绑定到 TCP 控制连接,校验客户端源 IP/端口,
+  `FRAG != 0` 的数据报静默丢弃。
+- **HTTP**(`http.go`):`127.0.0.1:8080`,支持 HTTP/1.1 CONNECT,以及
+  RFC 9298 `connect-udp` Upgrade + RFC 9297 DATAGRAM Capsule。
+- **无认证**(只应监听回环地址);Resolver 按 TCP/UDP 协议分别选择 IP、
+  `appId` 和可选域名。
+- inbound 仅依赖 TCP/UDP Dialer 与 Resolver 接口,不感知 aTrust 帧格式,
+  可使用 mock 独立测试。
 
 ---
 
@@ -269,8 +275,8 @@ state_file = "./state.enc"              # 加密会话凭据(0600)
 | --------------------- | --------------------------------------------------------------------------------------------------- | ------------------------------------------------ |
 | **M1 登录(Go)** | `idsauth` passkey 登录 + `sdpc` 控制面(authConfig/CAS/reportEnv/authCheck/sms/会话)+ 凭据持久化 | 命令行登录成功并产出 sid;服务端要求时完成短信验证 |
 | **M2 隧道**     | `frame` 编解码 + `tunnel`(TLS/认证/VIP/心跳/重连/换线)                                          | 隧道认证得 VIP,心跳稳定,断线自动重连             |
-| **M3 数据面**   | `l3` 每连接认证 + 用户态 TCP(重组)+ `Dialer`                                                    | 经隧道建立 TCP 连接到 library:443,完成 TLS 握手  |
-| **M4 代理入口** | `inbound` SOCKS5/HTTP(依赖 Dialer)+ Resolver                                                      | `curl --socks5-hostname` 访问 library 返回 200 |
+| **M3 数据面**   | `l3` 每流认证 + gVisor IPv4/TCP/UDP + `Dialer`                                                   | 经隧道完成 TCP TLS 握手及 UDP DNS 查询           |
+| **M4 代理入口** | SOCKS5 CONNECT/UDP ASSOCIATE + HTTP CONNECT/CONNECT-UDP + Resolver                                | TCP 页面返回 200,两种 UDP 入口查询校内 DNS 成功  |
 | **M5 鲁棒固化** | 保活/静默重登/线路切换/并发/优雅退出 + 配置样例 + README                                            | 长时间运行稳定,网络波动自愈                      |
 
 ---
