@@ -44,7 +44,9 @@ func (d *Dialer) Dial(ctx context.Context, ip string, port int) (net.Conn, error
 		return nil, fmt.Errorf("dial %s:%d: port out of range 1..65535", ip, port)
 	}
 	var lastErr error
+	attempts := 0
 	for attempt := range dialAttempts {
+		attempts = attempt + 1
 		if attempt > 0 {
 			d.Logger.Debug("dial retry", "ip", ip, "port", port,
 				"attempt", attempt+1, "cause", lastErr)
@@ -64,8 +66,29 @@ func (d *Dialer) Dial(ctx context.Context, ip string, port int) (net.Conn, error
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
+		// A persistent auth rejection (e.g. address check) never changes
+		// with retries; only churn (handshake loss) and line switches do.
+		var rej *AuthRejectedError
+		if errors.As(lastErr, &rej) && !rej.SwitchLine {
+			break
+		}
 	}
-	return nil, fmt.Errorf("dial %s:%d after %d attempts: %w", ip, port, dialAttempts, lastErr)
+	var rej *AuthRejectedError
+	if errors.As(lastErr, &rej) && rej.Code == 10000005 {
+		return nil, fmt.Errorf("dial %s:%d: gateway address check rejected the target; it is probably not an authorized VPN resource (code 10000005)", ip, port)
+	}
+	return nil, fmt.Errorf("dial %s:%d after %d attempt(s): %w", ip, port, attempts, lastErr)
+}
+
+// AuthRejectedError is a non-zero per-connection auth code from the gateway.
+type AuthRejectedError struct {
+	Code       int64
+	Message    string
+	SwitchLine bool // gateway asked for another line (TECHNICAL.md §11.2)
+}
+
+func (e *AuthRejectedError) Error() string {
+	return fmt.Sprintf("per-conn auth rejected: code %d: %s", e.Code, e.Message)
 }
 
 func (d *Dialer) dialOnce(ctx context.Context, ip string, port int) (net.Conn, error) {
@@ -108,12 +131,13 @@ func (d *Dialer) dialOnce(ctx context.Context, ip string, port int) (net.Conn, e
 	}
 	if resp.Code != 0 {
 		cleanup()
-		if resp.ShouldSwitchLine() {
+		rej := &AuthRejectedError{Code: resp.Code, Message: resp.Message, SwitchLine: resp.ShouldSwitchLine()}
+		if rej.SwitchLine {
 			d.Logger.Warn("per-conn auth requests line switch",
 				"code", resp.Code, "message", resp.Message)
 			d.Manager.SwitchLine()
 		}
-		return nil, fmt.Errorf("per-conn auth rejected: code %d: %s", resp.Code, resp.Message)
+		return nil, rej
 	}
 	if resp.ConnectToken == "" {
 		cleanup()

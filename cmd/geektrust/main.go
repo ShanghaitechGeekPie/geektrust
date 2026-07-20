@@ -132,9 +132,6 @@ func printSummary(cred *session.Credential) {
 	fmt.Printf("sid:       %s (redacted)\n", session.ShortSID(cred.SID))
 	fmt.Printf("device_id: %s\n", cred.DeviceID)
 	fmt.Printf("gateways:  %s\n", strings.Join(cred.Gateways, ", "))
-	if len(cred.DNS) > 0 {
-		fmt.Printf("dns:       %s\n", strings.Join(cred.DNS, ", "))
-	}
 	domains := make([]string, 0, len(cred.DomainMap))
 	for d := range cred.DomainMap {
 		domains = append(domains, d)

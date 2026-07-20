@@ -93,8 +93,12 @@ curl -x http://127.0.0.1:8080 https://library.shanghaitech.edu.cn/qbsjk/list.htm
 
 - 仅 TCP over IPv4。SOCKS5 UDP ASSOCIATE 与 IPv6 目标暂不支持(协议规格中
   UDP 数据帧格式未定;隧道 VIP 为 IPv4)。
-- 域名解析优先使用 clientResource 下发的应用地址表(域名 → 隧道内网 IP),
-  未命中时回退公网 DNS。
+- 域名解析优先使用 clientResource 下发的应用地址表(域名 → 隧道内网 IP);
+  未命中时回退 DNS(默认直连 223.5.5.5/119.29.29.29,过滤 fake-ip 假地址,
+  系统 DNS 兜底;可用 `dns` 配置项覆盖)。
+- 网关只路由授权资源:不在授权列表内的目标(即使解析正确)会被网关地址检查
+  拒绝(错误码 10000005)。官方客户端会把这类流量直连公网,纯代理架构下则
+  表现为连接被拒。
 - 浏览器路径(clientType=SDPBrowserClient),不计算接口签名。
 
 ## 鸣谢
