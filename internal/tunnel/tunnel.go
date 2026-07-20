@@ -103,6 +103,14 @@ type Tunnel struct {
 	unknownLogAt   atomic.Int64
 }
 
+func gatewayTLSConfig(addr string) *tls.Config {
+	cfg := &tls.Config{InsecureSkipVerify: true}
+	if host, _, err := net.SplitHostPort(addr); err == nil && net.ParseIP(host) == nil {
+		cfg.ServerName = host
+	}
+	return cfg
+}
+
 // Dial connects to addr, performs the one-shot tunnel authentication and
 // starts the reader and keepalive goroutines.
 func Dial(ctx context.Context, addr, sid string, logger *slog.Logger) (*Tunnel, error) {
@@ -117,11 +125,7 @@ func Dial(ctx context.Context, addr, sid string, logger *slog.Logger) (*Tunnel, 
 	// The gateway accepts plain TLS without SPA. Its certificate is issued
 	// for the portal hostname while we dial pool IPs, so verification is
 	// disabled like every known client does.
-	tlsCfg := &tls.Config{InsecureSkipVerify: true}
-	if host, _, err := net.SplitHostPort(addr); err == nil && net.ParseIP(host) == nil {
-		tlsCfg.ServerName = host
-	}
-	conn := tls.Client(raw, tlsCfg)
+	conn := tls.Client(raw, gatewayTLSConfig(addr))
 	if err := conn.HandshakeContext(dialCtx); err != nil {
 		raw.Close()
 		return nil, fmt.Errorf("tunnel tls %s: %w", addr, err)

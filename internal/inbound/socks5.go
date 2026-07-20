@@ -112,7 +112,11 @@ func (s *Server) handleSOCKS5(ctx context.Context, client net.Conn) {
 	defer cancel()
 	target, err := s.resolver.Resolve(setupCtx, host, port)
 	if err != nil {
-		s.logger.Warn("socks5 resolve failed", "host", host, "err", err)
+		if errors.Is(err, resolver.ErrGatewayLoop) {
+			s.logger.Debug("socks5 refused recursive gateway CONNECT", "host", host, "port", port)
+		} else {
+			s.logger.Warn("socks5 resolve failed", "host", host, "err", err)
+		}
 		if errors.Is(err, resolver.ErrUnresolvable) {
 			reply(socksReplyHostUnreachable)
 		} else {

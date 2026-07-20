@@ -3,11 +3,14 @@ package inbound
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
 	"strconv"
 	"time"
+
+	"geektrust/internal/resolver"
 )
 
 // bufferedConn relays reads through the parser's bufio.Reader so bytes read
@@ -60,7 +63,11 @@ func (s *Server) handleHTTPConnect(ctx context.Context, client net.Conn) {
 	defer cancel()
 	target, err := s.resolver.Resolve(setupCtx, host, port)
 	if err != nil {
-		s.logger.Warn("http resolve failed", "host", host, "err", err)
+		if errors.Is(err, resolver.ErrGatewayLoop) {
+			s.logger.Debug("http refused recursive gateway CONNECT", "host", host, "port", port)
+		} else {
+			s.logger.Warn("http resolve failed", "host", host, "err", err)
+		}
 		writeHTTPStatus(client, http.StatusBadGateway, "host not resolvable")
 		return
 	}

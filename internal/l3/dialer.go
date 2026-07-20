@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"sync"
+	"syscall"
 	"time"
 
 	"geektrust/internal/session"
@@ -76,7 +77,7 @@ func (d *Dialer) dialWithRetry(ctx context.Context, network, ip string, port int
 		if attempt > 0 {
 			d.Logger.Debug("dial retry", "network", network, "ip", ip, "port", port,
 				"attempt", attempt+1, "cause", lastErr)
-			timer := time.NewTimer(dialRetryDelay * time.Duration(attempt))
+			timer := time.NewTimer(dialRetryPause(attempt, lastErr))
 			select {
 			case <-timer.C:
 			case <-ctx.Done():
@@ -92,10 +93,9 @@ func (d *Dialer) dialWithRetry(ctx context.Context, network, ip string, port int
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		// A persistent auth rejection (e.g. address check) never changes
-		// with retries; only churn (handshake loss) and line switches do.
-		var rej *AuthRejectedError
-		if errors.As(lastErr, &rej) && !rej.SwitchLine {
+		// RST/connection-refused and persistent auth rejections cannot improve
+		// on an immediate retry. Gateway busy and line-switch responses can.
+		if !shouldRetryDial(lastErr) {
 			break
 		}
 	}
@@ -104,6 +104,24 @@ func (d *Dialer) dialWithRetry(ctx context.Context, network, ip string, port int
 		return nil, fmt.Errorf("dial %s:%d: gateway address check rejected the target; it is probably not an authorized VPN resource (code 10000005)", ip, port)
 	}
 	return nil, fmt.Errorf("dial %s:%d after %d attempt(s): %w", ip, port, attempts, lastErr)
+}
+func shouldRetryDial(err error) bool {
+	if errors.Is(err, syscall.ECONNREFUSED) {
+		return false
+	}
+	var rejected *AuthRejectedError
+	if errors.As(err, &rejected) {
+		return rejected.SwitchLine || rejected.Code == 10000008
+	}
+	return true
+}
+
+func dialRetryPause(attempt int, err error) time.Duration {
+	var rejected *AuthRejectedError
+	if errors.As(err, &rejected) && rejected.Code == 10000008 {
+		return 500 * time.Millisecond * time.Duration(attempt)
+	}
+	return dialRetryDelay * time.Duration(attempt)
 }
 
 // AuthRejectedError is a non-zero per-connection auth code from the gateway.

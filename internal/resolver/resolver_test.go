@@ -162,3 +162,32 @@ func TestResolveFallsBackToControllerDNSThroughTunnel(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestResolveRejectsGatewayLoops(t *testing.T) {
+	cred := &session.Credential{
+		Gateways: []string{"10.13.90.147:441", "vpn.example:441"},
+		AppID:    "fallback-app",
+		Policy: &sdpc.Resource{DomainRules: []sdpc.DomainRule{{
+			Domain: "mapped.example",
+			IP:     "10.13.90.147",
+			AppID:  "mapped-app",
+			Port:   sdpc.PortRange{Min: 441, Max: 441},
+			Proto:  "tcp",
+		}}},
+	}
+	r := New(&staticProvider{cred: cred}, nil)
+
+	for _, host := range []string{"10.13.90.147", "vpn.example", "mapped.example"} {
+		if _, err := r.Resolve(context.Background(), host, 441); !errors.Is(err, ErrGatewayLoop) {
+			t.Errorf("Resolve(%q, 441) error = %v, want ErrGatewayLoop", host, err)
+		}
+	}
+
+	got, err := r.Resolve(context.Background(), "10.13.90.147", 443)
+	if err != nil {
+		t.Fatalf("same gateway IP on another port: %v", err)
+	}
+	if got.IP != "10.13.90.147" || got.AppID != "fallback-app" {
+		t.Fatalf("non-gateway endpoint resolution = %+v", got)
+	}
+}

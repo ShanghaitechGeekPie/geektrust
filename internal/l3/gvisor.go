@@ -105,6 +105,9 @@ func (e *linkEndpoint) WritePackets(list stack.PacketBufferList) (int, tcpip.Err
 			if !route.deadline.IsZero() && errors.Is(err, os.ErrDeadlineExceeded) {
 				return 1, nil
 			}
+			if errors.Is(err, tunnel.ErrTunnelDead) || errors.Is(err, net.ErrClosed) {
+				return 1, nil
+			}
 			e.logger.Debug("IP stack uplink failed", "err", err)
 			return 0, &tcpip.ErrAborted{}
 		}
@@ -143,6 +146,9 @@ func (e *linkEndpoint) WritePackets(list stack.PacketBufferList) (int, tcpip.Err
 			if !route.deadline.IsZero() && errors.Is(err, os.ErrDeadlineExceeded) {
 				sent = end
 				continue
+			}
+			if errors.Is(err, tunnel.ErrTunnelDead) || errors.Is(err, net.ErrClosed) {
+				return len(packetBuffers), nil
 			}
 			e.logger.Debug("IP stack uplink failed", "err", err)
 			return packets[sent].position, &tcpip.ErrAborted{}

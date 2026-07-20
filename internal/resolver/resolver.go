@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strconv"
+	"strings"
 	"sync/atomic"
 
 	"geektrust/internal/session"
@@ -21,6 +23,10 @@ type TunnelDialer interface {
 // ErrUnresolvable means the host has neither a tunnel mapping nor a DNS
 // answer; inbound surfaces it as SOCKS5 host-unreachable.
 var ErrUnresolvable = errors.New("host not resolvable")
+
+// ErrGatewayLoop means a client tried to send a VPN gateway connection back
+// through the VPN. Refusing it breaks transparent-proxy routing cycles.
+var ErrGatewayLoop = errors.New("refusing to proxy a VPN gateway through its own tunnel")
 
 // DefaultPublicDNS is used before the tunnel DNS fallback. Querying public
 // resolvers directly sidesteps local fake-ip DNS for ordinary public names.
@@ -76,6 +82,9 @@ func (r *Resolver) Resolve(ctx context.Context, host string, port int) (Resoluti
 	if err != nil {
 		return Resolution{}, err
 	}
+	if isGatewayTarget(cred, host, nil, port) {
+		return Resolution{}, fmt.Errorf("%w: %s", ErrGatewayLoop, net.JoinHostPort(host, strconv.Itoa(port)))
+	}
 
 	if parsed := net.ParseIP(host); parsed != nil {
 		v4 := parsed.To4()
@@ -85,12 +94,18 @@ func (r *Resolver) Resolve(ctx context.Context, host string, port int) (Resoluti
 		return Resolution{IP: v4.String(), AppID: cred.Policy.AppIDFor(v4, port, cred.AppID)}, nil
 	}
 	if rule, ok := cred.Policy.MatchDomain(host, port); ok {
+		if isGatewayTarget(cred, host, net.ParseIP(rule.IP), port) {
+			return Resolution{}, fmt.Errorf("%w: %s", ErrGatewayLoop, net.JoinHostPort(host, strconv.Itoa(port)))
+		}
 		return Resolution{IP: rule.IP, AppID: rule.AppID}, nil
 	}
 
 	v4, err := r.lookupIPv4(ctx, host, cred)
 	if err != nil {
 		return Resolution{}, fmt.Errorf("%w: %s: %v", ErrUnresolvable, host, err)
+	}
+	if isGatewayTarget(cred, host, v4, port) {
+		return Resolution{}, fmt.Errorf("%w: %s", ErrGatewayLoop, net.JoinHostPort(host, strconv.Itoa(port)))
 	}
 	return routeDNSResult(cred, host, port, v4), nil
 }
@@ -164,6 +179,25 @@ func (r *Resolver) tunnelResolver(cred *session.Credential, server string) *net.
 			return r.tunnel.DialUDP(ctx, ip.String(), 53, appID, "")
 		},
 	}
+}
+
+func isGatewayTarget(cred *session.Credential, host string, resolved net.IP, port int) bool {
+	host = strings.TrimSuffix(host, ".")
+	for _, gateway := range cred.Gateways {
+		gatewayHost, gatewayPort, err := net.SplitHostPort(gateway)
+		if err != nil || gatewayPort != strconv.Itoa(port) {
+			continue
+		}
+		gatewayHost = strings.TrimSuffix(gatewayHost, ".")
+		if strings.EqualFold(host, gatewayHost) {
+			return true
+		}
+		gatewayIP := net.ParseIP(gatewayHost)
+		if gatewayIP != nil && resolved != nil && gatewayIP.Equal(resolved) {
+			return true
+		}
+	}
+	return false
 }
 
 var errNoIPv4Answer = errors.New("no usable IPv4 answer")

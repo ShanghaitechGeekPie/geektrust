@@ -2,6 +2,7 @@ package tunnel
 
 import (
 	"context"
+	"crypto/tls"
 	"net"
 	"sort"
 	"sync"
@@ -61,9 +62,10 @@ func (l *Lines) ReportFailure(addr string) {
 	l.mu.Unlock()
 }
 
-// Best probes every line concurrently and returns the reachable one with the
-// lowest latency, skipping lines in cooldown; if every line is cooling down
-// or none answers, falls back to the preferred line.
+// Best probes every line concurrently and returns the TLS-capable one with
+// the lowest latency, skipping lines in cooldown. A TCP-only probe can select
+// a local transparent-proxy loop as a healthy gateway, so the probe completes
+// the same TLS handshake required by the tunnel.
 func (l *Lines) Best(ctx context.Context) (string, error) {
 	addrs := l.Addrs()
 	if len(addrs) == 0 {
@@ -101,7 +103,7 @@ func (l *Lines) Best(ctx context.Context) (string, error) {
 			start := time.Now()
 			probeCtx, cancel := context.WithTimeout(ctx, probeTimeout)
 			defer cancel()
-			conn, err := (&net.Dialer{}).DialContext(probeCtx, "tcp", addr)
+			conn, err := probeGatewayTLS(probeCtx, addr)
 			if err != nil {
 				return
 			}
@@ -123,6 +125,18 @@ func (l *Lines) Best(ctx context.Context) (string, error) {
 	}
 	sort.Slice(reachable, func(i, j int) bool { return reachable[i].latency < reachable[j].latency })
 	return reachable[0].addr, nil
+}
+func probeGatewayTLS(ctx context.Context, addr string) (net.Conn, error) {
+	raw, err := (&net.Dialer{}).DialContext(ctx, "tcp", addr)
+	if err != nil {
+		return nil, err
+	}
+	conn := tls.Client(raw, gatewayTLSConfig(addr))
+	if err := conn.HandshakeContext(ctx); err != nil {
+		raw.Close()
+		return nil, err
+	}
+	return conn, nil
 }
 
 // ErrNoLines signals an empty gateway line pool.
