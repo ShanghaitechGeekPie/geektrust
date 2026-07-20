@@ -318,6 +318,11 @@ IPv4 并查 IP 规则,最后才用后缀通配符。IP 规则先选精确地址;
 区间按覆盖的地址数量比较,范围越小越优先。例如 10/8 区间应覆盖 `/0`
 兜底,而 `/16` 又比 10/8 更具体。同级规则保持 `appList` 顺序。
 
+公网 DNS 和系统 DNS 均没有可用 IPv4 时,Go 实现通过隧道内的 UDP 流查询
+`sdpPolicy.clientOption.dnsOption/dnsOptionV2` 下发的校内 DNS。该路径用于
+`netinfo.shanghaitech.edu.cn` 等 split-horizon 域名,不代表代理入口支持
+SOCKS5 UDP ASSOCIATE。配置中的 `dns` 可覆盖上游下发值。
+
 后缀规则兜底时,authRequestIP 还要携带原始域名(见 §6.2)。网关会用
 自己的 DNS 结果核对 `destAddr`;若公网 DNS 返回了不同的 CDN 地址,
 会返回 `73600004`。因此已被 IP 规则覆盖的目标应走 IP 规则,不要附带
@@ -680,6 +685,7 @@ X-Request-Sig = LOWER_HEX( HMAC-SHA256( hex_decode(signKey), pathWithQuery + bod
 | 隧道认证 `code:0` + deviceID + VIP | 成功 | — |
 | 每连接认证 `code:0` + connectToken | 成功 | — |
 | 每连接认证 `10000001 invalid arguments` | authRequestIP 结构不符 | 按 §6.2 校正字段(尤其 deviceId 小写、完整 env、去掉 appToken/rcAppliedInfo) |
+| 每连接认证 `10000008 auth in progress` | 短时间并发认证时网关仍在处理前一个请求 | 瞬时忙状态;允许上层稍后重试,无需换线或重登 |
 | 每连接认证 `73600004` | `domain` 与网关解析出的目标 IP 不一致 | 改用匹配 `destAddr` 的 IP 规则,或使用与网关一致的 DNS 结果 |
 | 无 SYN-ACK(握手超时) | 网关瞬时拒绝(快速连接 churn 触发限速/conntrack 污染) | 退避重试(§12) |
 | `1001`/`1002`/`1003`/`1005`/`1006` | 隧道:选线/拨号/封装/IO 超时/VIP 解析 | 换线/重连 |

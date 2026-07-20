@@ -10,7 +10,7 @@ import (
 )
 
 func TestBuildAuthRequestIPShape(t *testing.T) {
-	body, err := buildAuthRequestIP("sid", "681165d0-1c77-11ed-8650-cd35a51aa42a", "84B5B45FE73EC0036C3E97717308447F", "10.15.45.163", 443, net.IPv4(10, 19, 240, 43).To4(), 30001, 1, "")
+	body, err := buildAuthRequestIP("sid", "681165d0-1c77-11ed-8650-cd35a51aa42a", "84B5B45FE73EC0036C3E97717308447F", "10.15.45.163", 443, net.IPv4(10, 19, 240, 43).To4(), 30001, 1, "", protocolTCP)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,7 +87,7 @@ func TestBuildAuthRequestIPShape(t *testing.T) {
 
 	// domain is omitted when empty; when set it sits between ip and procHash.
 	withDomain, err := buildAuthRequestIP("sid", "app", "84B5B45FE73EC0036C3E97717308447F",
-		"180.101.49.44", 443, net.IPv4(10, 19, 240, 43).To4(), 30002, 2, "www.baidu.com")
+		"180.101.49.44", 443, net.IPv4(10, 19, 240, 43).To4(), 30002, 2, "www.baidu.com", protocolTCP)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -123,5 +123,23 @@ func TestBuildAuthRequestIPShape(t *testing.T) {
 		if keys[i] != want[i] {
 			t.Fatalf("key[%d] = %q, want %q", i, keys[i], want[i])
 		}
+	}
+}
+
+func TestBuildAuthRequestIPUDP(t *testing.T) {
+	body, err := buildAuthRequestIP("sid", "app", "device", "10.13.87.17", 53,
+		net.IPv4(10, 19, 240, 43).To4(), 30001, 1, "", protocolUDP)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var parsed struct {
+		URL string `json:"url"`
+		IP  authIP `json:"ip"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		t.Fatal(err)
+	}
+	if parsed.URL != "udp:10.13.87.17:53" || parsed.IP.Protocol != protocolUDP {
+		t.Fatalf("UDP auth request = %+v", parsed)
 	}
 }

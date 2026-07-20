@@ -2,6 +2,7 @@ package tunnel
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"io"
 	"net"
@@ -25,6 +26,34 @@ func testTunnel(conn net.Conn) *Tunnel {
 type discardSink struct{}
 
 func (discardSink) DeliverPacket([]byte) {}
+
+type captureSink chan []byte
+
+func (s captureSink) DeliverPacket(packet []byte) {
+	s <- append([]byte(nil), packet...)
+}
+
+func TestDispatchRoutesUDPByDestinationPort(t *testing.T) {
+	tun := testTunnel(nil)
+	sink := make(captureSink, 1)
+	port, err := tun.ReserveConn(sink)
+	if err != nil {
+		t.Fatal(err)
+	}
+	packet := make([]byte, 28)
+	packet[0] = 0x45
+	packet[9] = 17
+	binary.BigEndian.PutUint16(packet[22:24], port)
+	tun.dispatch(packet)
+	select {
+	case got := <-sink:
+		if len(got) != len(packet) {
+			t.Fatalf("delivered UDP packet length = %d, want %d", len(got), len(packet))
+		}
+	default:
+		t.Fatal("UDP packet was not delivered")
+	}
+}
 
 func TestReserveConnIsAtomicUnderConcurrency(t *testing.T) {
 	tun := testTunnel(nil)

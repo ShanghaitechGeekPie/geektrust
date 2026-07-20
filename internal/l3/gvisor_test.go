@@ -157,16 +157,20 @@ func TestLinkEndpointClosePreventsRouteResurrection(t *testing.T) {
 	}
 }
 
-func TestTCPSourcePortValidatesIPv4TCPHeader(t *testing.T) {
-	packet := testIPv4TCPPacket(32123, 993)
-	if port, ok := tcpSourcePort(packet); !ok || port != 32123 {
-		t.Fatalf("tcpSourcePort = (%d, %v), want (32123, true)", port, ok)
+func TestIPSourcePortValidatesTCPAndUDPHeaders(t *testing.T) {
+	tcpPacket := testIPv4TCPPacket(32123, 993)
+	if port, ok := ipSourcePort(tcpPacket); !ok || port != 32123 {
+		t.Fatalf("TCP source port = (%d, %v), want (32123, true)", port, ok)
 	}
-	packet[9] = 17
-	if _, ok := tcpSourcePort(packet); ok {
-		t.Fatal("UDP packet accepted as TCP")
+	udpPacket := testIPv4UDPPacket(32124, 53)
+	if port, ok := ipSourcePort(udpPacket); !ok || port != 32124 {
+		t.Fatalf("UDP source port = (%d, %v), want (32124, true)", port, ok)
 	}
-	if _, ok := tcpSourcePort(packet[:10]); ok {
+	tcpPacket[9] = 1
+	if _, ok := ipSourcePort(tcpPacket); ok {
+		t.Fatal("ICMP packet accepted as TCP or UDP")
+	}
+	if _, ok := ipSourcePort(tcpPacket[:10]); ok {
 		t.Fatal("truncated packet accepted")
 	}
 }
@@ -182,5 +186,19 @@ func testIPv4TCPPacket(srcPort, dstPort uint16) []byte {
 	binary.BigEndian.PutUint16(packet[20:22], srcPort)
 	binary.BigEndian.PutUint16(packet[22:24], dstPort)
 	packet[32] = 5 << 4
+	return packet
+}
+
+func testIPv4UDPPacket(srcPort, dstPort uint16) []byte {
+	packet := make([]byte, 28)
+	packet[0] = 0x45
+	binary.BigEndian.PutUint16(packet[2:4], uint16(len(packet)))
+	packet[8] = 64
+	packet[9] = 17
+	copy(packet[12:16], []byte{10, 19, 240, 43})
+	copy(packet[16:20], []byte{10, 13, 87, 17})
+	binary.BigEndian.PutUint16(packet[20:22], srcPort)
+	binary.BigEndian.PutUint16(packet[22:24], dstPort)
+	binary.BigEndian.PutUint16(packet[24:26], 8)
 	return packet
 }

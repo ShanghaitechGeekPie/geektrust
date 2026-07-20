@@ -1,6 +1,6 @@
 // Package resolver maps target hosts to tunnel IPs and authorization data.
-// It prefers exact domain mappings and DNS-resolved IP policy, then falls
-// back to domain wildcards when no IP rule applies.
+// It prefers exact domain mappings and public DNS-resolved IP policy, then
+// falls back to controller-pushed split-horizon DNS through the tunnel.
 package resolver
 
 import (
@@ -13,31 +13,31 @@ import (
 	"geektrust/internal/session"
 )
 
+type TunnelDialer interface {
+	Dial(ctx context.Context, ip string, port int, appID, domain string) (net.Conn, error)
+	DialUDP(ctx context.Context, ip string, port int, appID, domain string) (net.Conn, error)
+}
+
 // ErrUnresolvable means the host has neither a tunnel mapping nor a DNS
 // answer; inbound surfaces it as SOCKS5 host-unreachable.
 var ErrUnresolvable = errors.New("host not resolvable")
 
-// DefaultPublicDNS is used when no explicit servers are configured. Querying
-// public resolvers directly sidesteps local fake-ip DNS: proxy tools in
-// fake-ip mode answer every system-DNS query with 198.18.0.0/15 placeholders
-// that mean nothing inside the tunnel. The system resolver remains the final
-// stage for environments with working local DNS.
+// DefaultPublicDNS is used before the tunnel DNS fallback. Querying public
+// resolvers directly sidesteps local fake-ip DNS for ordinary public names.
+// Controller-pushed DNS is queried through the VPN for split-horizon names.
 var DefaultPublicDNS = []string{"223.5.5.5", "119.29.29.29"}
 
 // Resolver resolves targets against the live credential's routing policy.
 type Resolver struct {
 	provider session.CredentialProvider
-	stages   []*net.Resolver // tried in order: explicit/public servers, then system
+	tunnel   TunnelDialer
+	stages   []*net.Resolver // direct public resolvers, then the system resolver
 }
 
-// New builds a Resolver. dnsServers (bare IPs) override the default public
-// servers for the DNS fallback stage.
-func New(provider session.CredentialProvider, dnsServers []string) *Resolver {
-	servers := dnsServers
-	if len(servers) == 0 {
-		servers = DefaultPublicDNS
-	}
-	pool := append([]string(nil), servers...)
+// New builds a Resolver. Controller-pushed or configured DNS servers are read
+// from the live credential and reached through tunnel.
+func New(provider session.CredentialProvider, tunnel TunnelDialer) *Resolver {
+	pool := append([]string(nil), DefaultPublicDNS...)
 	var next atomic.Uint32
 	custom := &net.Resolver{
 		PreferGo: true,
@@ -45,11 +45,11 @@ func New(provider session.CredentialProvider, dnsServers []string) *Resolver {
 			// Honor the requested network: the resolver retries truncated
 			// answers over TCP, which needs the length-prefixed TCP
 			// exchange, not another UDP socket.
-			server := pool[next.Add(1)%uint32(len(pool))]
+			server := pool[(next.Add(1)-1)%uint32(len(pool))]
 			return (&net.Dialer{}).DialContext(ctx, network, net.JoinHostPort(server, "53"))
 		},
 	}
-	return &Resolver{provider: provider, stages: []*net.Resolver{custom, net.DefaultResolver}}
+	return &Resolver{provider: provider, tunnel: tunnel, stages: []*net.Resolver{custom, net.DefaultResolver}}
 }
 
 // Resolution is a resolved dial target.
@@ -88,7 +88,7 @@ func (r *Resolver) Resolve(ctx context.Context, host string, port int) (Resoluti
 		return Resolution{IP: rule.IP, AppID: rule.AppID}, nil
 	}
 
-	v4, err := r.lookupIPv4(ctx, host)
+	v4, err := r.lookupIPv4(ctx, host, cred)
 	if err != nil {
 		return Resolution{}, fmt.Errorf("%w: %s: %v", ErrUnresolvable, host, err)
 	}
@@ -105,24 +105,65 @@ func routeDNSResult(cred *session.Credential, host string, port int, v4 net.IP) 
 	return Resolution{IP: v4.String(), AppID: cred.AppID}
 }
 
-// lookupIPv4 tries each resolver stage in order and returns the first usable
-// IPv4 answer, skipping fake-ip placeholders.
-func (r *Resolver) lookupIPv4(ctx context.Context, host string) (net.IP, error) {
+// lookupIPv4 first tries direct public/system resolution. If those stages
+// produce no usable address, controller-pushed DNS servers are queried over
+// authenticated UDP flows inside the VPN.
+func (r *Resolver) lookupIPv4(ctx context.Context, host string, cred *session.Credential) (net.IP, error) {
 	var lastErr error = errNoIPv4Answer
 	for _, res := range r.stages {
-		addrs, err := res.LookupIPAddr(ctx, host)
-		if err != nil {
+		if v4, err := lookupIPv4With(ctx, res, host); err == nil {
+			return v4, nil
+		} else {
 			lastErr = err
-			continue
 		}
-		for _, a := range addrs {
-			if v4 := a.IP.To4(); v4 != nil && !IsFakeIP(v4) {
+	}
+	if r.tunnel != nil {
+		for _, server := range cred.DNS {
+			res := r.tunnelResolver(cred, server)
+			if v4, err := lookupIPv4With(ctx, res, host); err == nil {
+				return v4, nil
+			} else {
+				lastErr = err
+			}
+		}
+	}
+	return nil, lastErr
+}
+
+func lookupIPv4With(ctx context.Context, res *net.Resolver, host string) (net.IP, error) {
+	addrs, err := res.LookupNetIP(ctx, "ip4", host)
+	if err != nil {
+		return nil, err
+	}
+	for _, addr := range addrs {
+		if addr.Is4() {
+			v4 := net.IP(addr.AsSlice())
+			if !IsFakeIP(v4) {
 				return v4, nil
 			}
 		}
-		lastErr = errNoIPv4Answer
 	}
-	return nil, lastErr
+	return nil, errNoIPv4Answer
+}
+
+func (r *Resolver) tunnelResolver(cred *session.Credential, server string) *net.Resolver {
+	return &net.Resolver{
+		PreferGo: true,
+		Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
+			ip := net.ParseIP(server).To4()
+			if ip == nil {
+				return nil, fmt.Errorf("invalid tunnel DNS server %q", server)
+			}
+			appID := cred.AppID
+			if cred.Policy != nil {
+				appID = cred.Policy.AppIDFor(ip, 53, appID)
+			}
+			if network == "tcp" || network == "tcp4" {
+				return r.tunnel.Dial(ctx, ip.String(), 53, appID, "")
+			}
+			return r.tunnel.DialUDP(ctx, ip.String(), 53, appID, "")
+		},
+	}
 }
 
 var errNoIPv4Answer = errors.New("no usable IPv4 answer")

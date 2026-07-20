@@ -1,8 +1,12 @@
 package resolver
 
 import (
+	"context"
+	"encoding/binary"
+	"errors"
 	"net"
 	"testing"
+	"time"
 
 	"geektrust/internal/sdpc"
 	"geektrust/internal/session"
@@ -29,15 +33,9 @@ func TestIsFakeIP(t *testing.T) {
 }
 
 func TestNewStages(t *testing.T) {
-	// Empty config: public defaults + system fallback.
 	r := New(nil, nil)
 	if len(r.stages) != 2 {
 		t.Fatalf("stages = %d, want 2 (public defaults + system)", len(r.stages))
-	}
-	// Explicit servers still keep the system stage as last resort.
-	r = New(nil, []string{"1.2.3.4"})
-	if len(r.stages) != 2 {
-		t.Fatalf("stages = %d, want 2", len(r.stages))
 	}
 }
 
@@ -74,5 +72,93 @@ func TestRouteDNSResultPrefersIPPolicy(t *testing.T) {
 	got = routeDNSResult(cred, "www.baidu.com", 443, ip)
 	if got.AppID != "fallback-app" || got.Domain != "" {
 		t.Fatalf("default resolution = %+v", got)
+	}
+}
+
+type staticProvider struct {
+	cred *session.Credential
+}
+
+func (p *staticProvider) Credential(context.Context) (*session.Credential, error) {
+	return p.cred, nil
+}
+
+func (*staticProvider) Invalidate() {}
+
+type localDNSTunnel struct {
+	server *net.UDPAddr
+	ip     string
+	appID  string
+}
+
+func (d *localDNSTunnel) Dial(context.Context, string, int, string, string) (net.Conn, error) {
+	return nil, errors.New("unexpected TCP DNS fallback")
+}
+
+func (d *localDNSTunnel) DialUDP(_ context.Context, ip string, _ int, appID, _ string) (net.Conn, error) {
+	d.ip, d.appID = ip, appID
+	return net.DialUDP("udp4", nil, d.server)
+}
+
+func TestResolveFallsBackToControllerDNSThroughTunnel(t *testing.T) {
+	server, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	served := make(chan error, 1)
+	go func() {
+		buf := make([]byte, 512)
+		n, client, err := server.ReadFromUDP(buf)
+		if err != nil {
+			served <- err
+			return
+		}
+		questionEnd := 12
+		for questionEnd < n && buf[questionEnd] != 0 {
+			questionEnd += int(buf[questionEnd]) + 1
+		}
+		questionEnd += 5 // root label plus QTYPE and QCLASS
+		if questionEnd > n {
+			served <- errors.New("malformed DNS question")
+			return
+		}
+		response := append([]byte(nil), buf[:questionEnd]...)
+		response[2], response[3] = 0x81, 0x80
+		binary.BigEndian.PutUint16(response[6:8], 1)
+		binary.BigEndian.PutUint16(response[8:10], 0)
+		binary.BigEndian.PutUint16(response[10:12], 0)
+		response = append(response,
+			0xc0, 0x0c, // compressed owner name
+			0x00, 0x01, 0x00, 0x01, // A, IN
+			0x00, 0x00, 0x00, 0x3c, // TTL
+			0x00, 0x04, 10, 20, 30, 40,
+		)
+		_, err = server.WriteToUDP(response, client)
+		served <- err
+	}()
+
+	cred := &session.Credential{
+		DNS:    []string{"10.13.87.17"},
+		Policy: &sdpc.Resource{},
+		AppID:  "fallback-app",
+	}
+	tunnel := &localDNSTunnel{server: server.LocalAddr().(*net.UDPAddr)}
+	r := New(&staticProvider{cred: cred}, tunnel)
+	r.stages = nil // isolate the split-horizon fallback from real network DNS
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	got, err := r.Resolve(ctx, "netinfo.shanghaitech.edu.cn", 443)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.IP != "10.20.30.40" || got.AppID != "fallback-app" {
+		t.Fatalf("resolution = %+v", got)
+	}
+	if tunnel.ip != "10.13.87.17" || tunnel.appID != "fallback-app" {
+		t.Fatalf("DNS tunnel target = %s appID=%s", tunnel.ip, tunnel.appID)
+	}
+	if err := <-served; err != nil {
+		t.Fatal(err)
 	}
 }

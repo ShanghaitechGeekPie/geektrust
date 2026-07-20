@@ -53,7 +53,7 @@ device_id = "84B5B45FE73EC0036C3E97717308447F"  # 持久化设备标识,勿改
 base_url = "https://vpn.shanghaitech.edu.cn"
 platform = "Mac"                      # 大小写敏感
 gateways = []                         # 留空 = 从上游自动获取网关线路
-dns = []                              # 可选:回退解析用的 DNS 服务器
+dns = []                              # 可选:覆盖上游下发的隧道内 DNS
 state_file = "./state.enc"            # 加密的会话凭据
 
 [inbound.socks5]
@@ -108,15 +108,17 @@ curl -x http://127.0.0.1:8080 https://library.shanghaitech.edu.cn/qbsjk/list.htm
 - IP 规则相同时优先更具体的规则。校园内外网的兜底应用覆盖大部分地址
   和端口,但网关自身 IP、`198.18.0.0/15` 等地址仍会被网关拒绝。
 
-DNS 默认直连 `223.5.5.5` 和 `119.29.29.29`,并过滤 fake-ip 假地址;
-系统 DNS 是最后一层兜底。可用 `dns` 配置项覆盖。后缀通配符兜底会把
-域名交给网关再次解析,CDN 地址不一致时可能被拒绝。
+DNS 先直连 `223.5.5.5`、`119.29.29.29` 和系统解析器,并过滤 Clash 等
+代理产生的 `198.18.0.0/15` fake-ip。公网/系统 DNS 没有可用 IPv4 时,
+再通过 VPN 内的 UDP 流查询上游下发的校内 DNS,用于解析 split-horizon
+内网域名。`dns` 配置项可覆盖上游 DNS。后缀通配符兜底会把域名交给
+网关再次解析,CDN 地址不一致时可能被拒绝。
 
 ## 限制
 
-- 仅 TCP over IPv4。网关接入线路本身可以是 IPv6,但线上隧道认证分配的是
-  `addrType=1` IPv4 VIP;因此 IPv6 字面量和仅有 AAAA 的目标无法转发。域名有
-  IPv4 地址时正常使用。SOCKS5 UDP ASSOCIATE 也暂不支持(UDP 数据帧格式未定)。
+- 代理入口仅支持 TCP over IPv4。网关接入线路本身可以是 IPv6,但线上隧道认证
+  分配的是 `addrType=1` IPv4 VIP;因此 IPv6 字面量和仅有 AAAA 的目标无法转发。
+  域名解析器会在隧道内使用 UDP 查询校内 DNS,但 SOCKS5 UDP ASSOCIATE 仍不支持。
 - 控制面走浏览器路径(clientType=SDPBrowserClient),不计算接口签名。
 
 ## 鸣谢

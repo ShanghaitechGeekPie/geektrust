@@ -490,10 +490,10 @@ func (t *Tunnel) handleAuthResponse(payload []byte) {
 	ch <- resp // buffered slot, requester has not received yet: never blocks
 }
 
-// dispatch routes a downlink IPv4 packet to the connection owning the TCP
+// dispatch routes a downlink IPv4 TCP or UDP packet to the flow owning its
 // destination port (our virtual source port).
 func (t *Tunnel) dispatch(pkt []byte) {
-	if len(pkt) < 20 || pkt[0]>>4 != 4 || pkt[9] != 6 {
+	if len(pkt) < 20 || pkt[0]>>4 != 4 || (pkt[9] != 6 && pkt[9] != 17) {
 		return
 	}
 	ihl := int(pkt[0]&0x0F) * 4

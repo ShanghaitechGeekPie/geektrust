@@ -69,9 +69,10 @@
 
   隧道模块只消费 `Credential`,不感知登录流程;登录模块负责产出与刷新凭据。
 - **`Resolver`(目标解析与授权选择)**:从 clientResource 读取精确域名、IP/CIDR/范围和后缀通配符规则。
-  域名先查精确映射,再用公网 DNS 得到 IPv4 并查 IP 规则;IP 规则未命中时才用后缀通配符。
-  Resolver 返回 IP、`appId` 以及可选 `domain`。解析失败时,inbound 可直接返回 SOCKS5
-  host-unreachable;其他失败按拨号错误处理。解析职责仍留在 inbound 层。
+  域名先查精确映射,再尝试公网/系统 DNS;没有可用 IPv4 时,通过 l3 的内部 UDP
+  接口查询上游下发的 split-horizon DNS。解析结果再匹配 IP 规则,最后才用后缀通配符。
+  Resolver 返回 IP、`appId` 以及可选 `domain`。解析失败时,inbound 直接返回 SOCKS5
+  host-unreachable;其他失败按拨号错误处理。
 
 ---
 

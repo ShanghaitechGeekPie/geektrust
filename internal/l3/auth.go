@@ -9,9 +9,11 @@ import (
 	"time"
 )
 
-// procPath is the process path impersonated in the trust environment. Its
-// SHA-256 (uppercase hex) must appear as both env fingerprint and procHash.
-const procPath = "/Applications/aTrust.app/Contents/Resources/bin/aTrustXtunnel"
+const (
+	protocolTCP = 6
+	protocolUDP = 17
+	procPath    = "/Applications/aTrust.app/Contents/Resources/bin/aTrustXtunnel"
+)
 
 // authRequestIP field order is protocol-significant: the gateway expects
 // exactly this order. Go marshals struct fields in declaration order.
@@ -65,9 +67,18 @@ type trustEnv struct {
 // env.application.runtime.process.fingerprint and procHash.
 var procFingerprint = fmt.Sprintf("%X", sha256.Sum256([]byte(procPath)))
 
-// buildAuthRequestIP serializes the per-connection auth body. domain is the
-// original hostname for wildcard-authorized targets (empty otherwise).
-func buildAuthRequestIP(sid, appID, deviceID, dstIP string, dstPort int, vip net.IP, srcPort uint16, conntrackHash uint64, domain string) ([]byte, error) {
+// buildAuthRequestIP serializes a per-flow auth body. domain is the original
+// hostname for wildcard-authorized targets (empty otherwise).
+func buildAuthRequestIP(sid, appID, deviceID, dstIP string, dstPort int, vip net.IP, srcPort uint16, conntrackHash uint64, domain string, protocol int) ([]byte, error) {
+	network := ""
+	switch protocol {
+	case protocolTCP:
+		network = "tcp"
+	case protocolUDP:
+		network = "udp"
+	default:
+		return nil, fmt.Errorf("unsupported IP protocol %d", protocol)
+	}
 	// connectionId = MD5(device_id).upper() + "-" + unix microseconds.
 	connID := fmt.Sprintf("%X-%d", md5.Sum([]byte(deviceID)), time.Now().UnixMicro())
 
@@ -86,7 +97,7 @@ func buildAuthRequestIP(sid, appID, deviceID, dstIP string, dstPort int, vip net
 	req := authRequestIP{
 		Sid:           sid,
 		AppID:         appID,
-		URL:           fmt.Sprintf("tcp:%s:%d", dstIP, dstPort),
+		URL:           fmt.Sprintf("%s:%s:%d", network, dstIP, dstPort),
 		DeviceID:      deviceID,
 		ConnectionID:  connID,
 		Env:           env,
@@ -94,7 +105,7 @@ func buildAuthRequestIP(sid, appID, deviceID, dstIP string, dstPort int, vip net
 		Lang:          "zh-CN",
 		IP: authIP{
 			Atype:    0x0800, // 2048, IPv4
-			Protocol: 6,      // TCP
+			Protocol: protocol,
 			DestAddr: dstIP,
 			DestPort: dstPort,
 			SrcAddr:  vip.String(),

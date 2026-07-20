@@ -23,8 +23,8 @@ const (
 	dialRetryDelay = 1500 * time.Millisecond
 )
 
-// Dialer establishes TCP connections through the tunnel. Inbound proxies
-// depend only on its Dial method and never see aTrust details.
+// Dialer establishes authenticated IP flows through the tunnel. Inbound
+// proxies use TCP; the resolver also uses connected UDP for internal DNS.
 type Dialer struct {
 	Manager  *tunnel.Manager
 	Provider session.CredentialProvider
@@ -34,28 +34,47 @@ type Dialer struct {
 	stacks  map[*tunnel.Tunnel]*tcpStack
 }
 
-// Dial connects to an already-resolved tunnel IP:port (domain resolution
-// happens in the inbound layer). appID is the authorizing application
-// chosen by the resolver; if empty, it is looked up from the IP policy.
-// domain carries the original hostname for wildcard-authorized targets.
-// Failures are retried with the churn backoff; line-switch auth codes
-// rotate the gateway line.
+// Dial connects to an already-resolved tunnel TCP target. appID is the
+// authorizing application chosen by the resolver; domain carries the original
+// hostname for wildcard-authorized targets.
 func (d *Dialer) Dial(ctx context.Context, ip string, port int, appID, domain string) (net.Conn, error) {
-	// Validate before any tunnel work: the data plane is IPv4-only and the
-	// wire narrows the port to uint16 (a wrapped value would mismatch the
-	// auth request's destPort).
+	if err := validateTarget(ip, port); err != nil {
+		return nil, err
+	}
+	return d.dialWithRetry(ctx, "tcp", ip, port, func() (net.Conn, error) {
+		return d.dialOnce(ctx, ip, port, appID, domain)
+	})
+}
+
+// DialUDP opens an authenticated connected UDP flow. It is intentionally
+// exposed only to internal services such as split-horizon DNS; SOCKS5 UDP
+// ASSOCIATE remains unsupported.
+func (d *Dialer) DialUDP(ctx context.Context, ip string, port int, appID, domain string) (net.Conn, error) {
+	if err := validateTarget(ip, port); err != nil {
+		return nil, err
+	}
+	return d.dialWithRetry(ctx, "udp", ip, port, func() (net.Conn, error) {
+		return d.dialUDPOnce(ctx, ip, port, appID, domain)
+	})
+}
+
+func validateTarget(ip string, port int) error {
 	if v4 := net.ParseIP(ip).To4(); v4 == nil {
-		return nil, fmt.Errorf("dial %s:%d: only IPv4 targets are supported", ip, port)
+		return fmt.Errorf("dial %s:%d: only IPv4 targets are supported", ip, port)
 	}
 	if port < 1 || port > 65535 {
-		return nil, fmt.Errorf("dial %s:%d: port out of range 1..65535", ip, port)
+		return fmt.Errorf("dial %s:%d: port out of range 1..65535", ip, port)
 	}
+	return nil
+}
+
+func (d *Dialer) dialWithRetry(ctx context.Context, network, ip string, port int, dial func() (net.Conn, error)) (net.Conn, error) {
 	var lastErr error
 	attempts := 0
 	for attempt := range dialAttempts {
 		attempts = attempt + 1
 		if attempt > 0 {
-			d.Logger.Debug("dial retry", "ip", ip, "port", port,
+			d.Logger.Debug("dial retry", "network", network, "ip", ip, "port", port,
 				"attempt", attempt+1, "cause", lastErr)
 			timer := time.NewTimer(dialRetryDelay * time.Duration(attempt))
 			select {
@@ -65,7 +84,7 @@ func (d *Dialer) Dial(ctx context.Context, ip string, port int, appID, domain st
 				return nil, ctx.Err()
 			}
 		}
-		conn, err := d.dialOnce(ctx, ip, port, appID, domain)
+		conn, err := dial()
 		if err == nil {
 			return conn, nil
 		}
@@ -124,7 +143,17 @@ func (d *Dialer) stackFor(tun *tunnel.Tunnel) (*tcpStack, error) {
 	return transport, nil
 }
 
-func (d *Dialer) dialOnce(ctx context.Context, ip string, port int, appID, domain string) (net.Conn, error) {
+type authorizedFlow struct {
+	transport *tcpStack
+	srcPort   uint16
+	token     string
+}
+
+func (f *authorizedFlow) release() {
+	f.transport.release(f.srcPort)
+}
+
+func (d *Dialer) authorizeFlow(ctx context.Context, ip string, port int, appID, domain string, protocol int) (*authorizedFlow, error) {
 	tun, err := d.Manager.Tunnel(ctx)
 	if err != nil {
 		return nil, err
@@ -148,21 +177,21 @@ func (d *Dialer) dialOnce(ctx context.Context, ip string, port int, appID, domai
 		tun.UnregisterConn(srcPort)
 		return nil, tunnel.ErrTunnelDead
 	}
-	release := func() { transport.release(srcPort) }
+	flow := &authorizedFlow{transport: transport, srcPort: srcPort}
 
 	authID := tun.NextAuthID()
-	body, err := buildAuthRequestIP(cred.SID, appID, cred.DeviceID, ip, port, tun.VIP(), srcPort, authID, domain)
+	body, err := buildAuthRequestIP(cred.SID, appID, cred.DeviceID, ip, port, tun.VIP(), srcPort, authID, domain, protocol)
 	if err != nil {
-		release()
+		flow.release()
 		return nil, err
 	}
 	resp, err := tun.RequestAuth(ctx, authID, body)
 	if err != nil {
-		release()
+		flow.release()
 		return nil, fmt.Errorf("per-conn auth: %w", err)
 	}
 	if resp.Code != 0 {
-		release()
+		flow.release()
 		rej := &AuthRejectedError{Code: resp.Code, Message: resp.Message, SwitchLine: resp.ShouldSwitchLine()}
 		if rej.SwitchLine {
 			d.Logger.Warn("per-conn auth requests line switch",
@@ -172,34 +201,59 @@ func (d *Dialer) dialOnce(ctx context.Context, ip string, port int, appID, domai
 		return nil, rej
 	}
 	if resp.ConnectToken == "" {
-		release()
+		flow.release()
 		return nil, errors.New("per-conn auth returned no connectToken")
+	}
+	flow.token = resp.ConnectToken
+	return flow, nil
+}
+
+func (d *Dialer) dialOnce(ctx context.Context, ip string, port int, appID, domain string) (net.Conn, error) {
+	flow, err := d.authorizeFlow(ctx, ip, port, appID, domain, protocolTCP)
+	if err != nil {
+		return nil, err
 	}
 	handshakeDeadline := time.Now().Add(tcpHandshakeTimeout)
 	if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(handshakeDeadline) {
 		handshakeDeadline = ctxDeadline
 	}
-	if !transport.endpoint.updateRoute(srcPort, dataRoute{
-		token: resp.ConnectToken, deadline: handshakeDeadline,
+	if !flow.transport.endpoint.updateRoute(flow.srcPort, dataRoute{
+		token: flow.token, deadline: handshakeDeadline,
 	}) {
-		release()
+		flow.release()
 		return nil, tunnel.ErrTunnelDead
 	}
 
-	conn, err := transport.dial(ctx, net.ParseIP(ip).To4(), srcPort, uint16(port), handshakeDeadline)
+	conn, err := flow.transport.dial(ctx, net.ParseIP(ip).To4(), flow.srcPort, uint16(port), handshakeDeadline)
 	if err != nil {
 		// Expire the route immediately: the asynchronous FIFO may still contain
 		// a SYN/RST, which must be dropped rather than sent after retry.
-		transport.endpoint.updateRoute(srcPort, dataRoute{
-			token: resp.ConnectToken, deadline: time.Now().Add(-time.Second),
+		flow.transport.endpoint.updateRoute(flow.srcPort, dataRoute{
+			token: flow.token, deadline: time.Now().Add(-time.Second),
 		})
-		transport.releaseLater(srcPort)
+		flow.transport.releaseLater(flow.srcPort)
 		return nil, err
 	}
-	routeAlive := transport.endpoint.updateRoute(srcPort, dataRoute{token: resp.ConnectToken})
-	if !routeAlive {
+	if !flow.transport.endpoint.updateRoute(flow.srcPort, dataRoute{token: flow.token}) {
 		conn.Close()
 		return nil, tunnel.ErrTunnelDead
 	}
-	return &managedTCPConn{TCPConn: conn, stack: transport, port: srcPort}, nil
+	return &managedTCPConn{TCPConn: conn, stack: flow.transport, port: flow.srcPort}, nil
+}
+
+func (d *Dialer) dialUDPOnce(ctx context.Context, ip string, port int, appID, domain string) (net.Conn, error) {
+	flow, err := d.authorizeFlow(ctx, ip, port, appID, domain, protocolUDP)
+	if err != nil {
+		return nil, err
+	}
+	if !flow.transport.endpoint.updateRoute(flow.srcPort, dataRoute{token: flow.token}) {
+		flow.release()
+		return nil, tunnel.ErrTunnelDead
+	}
+	conn, err := flow.transport.dialUDP(ctx, net.ParseIP(ip).To4(), flow.srcPort, uint16(port))
+	if err != nil {
+		flow.release()
+		return nil, err
+	}
+	return &managedUDPConn{UDPConn: conn, stack: flow.transport, port: flow.srcPort}, nil
 }

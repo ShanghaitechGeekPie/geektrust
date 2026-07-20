@@ -20,6 +20,7 @@ import (
 	"github.com/metacubex/gvisor/pkg/tcpip/network/ipv4"
 	"github.com/metacubex/gvisor/pkg/tcpip/stack"
 	"github.com/metacubex/gvisor/pkg/tcpip/transport/tcp"
+	"github.com/metacubex/gvisor/pkg/tcpip/transport/udp"
 )
 
 const (
@@ -104,7 +105,7 @@ func (e *linkEndpoint) WritePackets(list stack.PacketBufferList) (int, tcpip.Err
 			if !route.deadline.IsZero() && errors.Is(err, os.ErrDeadlineExceeded) {
 				return 1, nil
 			}
-			e.logger.Debug("TCP stack uplink failed", "err", err)
+			e.logger.Debug("IP stack uplink failed", "err", err)
 			return 0, &tcpip.ErrAborted{}
 		}
 		return 1, nil
@@ -143,7 +144,7 @@ func (e *linkEndpoint) WritePackets(list stack.PacketBufferList) (int, tcpip.Err
 				sent = end
 				continue
 			}
-			e.logger.Debug("TCP stack uplink failed", "err", err)
+			e.logger.Debug("IP stack uplink failed", "err", err)
 			return packets[sent].position, &tcpip.ErrAborted{}
 		}
 		sent = end
@@ -157,7 +158,7 @@ func routeExpired(route dataRoute) bool {
 
 func (e *linkEndpoint) routePacket(packet *stack.PacketBuffer) (dataRoute, []byte, tcpip.Error) {
 	data := flattenPacket(packet)
-	port, ok := tcpSourcePort(data)
+	port, ok := ipSourcePort(data)
 	if !ok {
 		return dataRoute{}, nil, &tcpip.ErrMalformedHeader{}
 	}
@@ -198,12 +199,24 @@ func flattenPacket(packet *stack.PacketBuffer) []byte {
 	return data[:written]
 }
 
-func tcpSourcePort(packet []byte) (uint16, bool) {
-	if len(packet) < header.IPv4MinimumSize || packet[0]>>4 != 4 || packet[9] != uint8(header.TCPProtocolNumber) {
+func ipSourcePort(packet []byte) (uint16, bool) {
+	if len(packet) < header.IPv4MinimumSize || packet[0]>>4 != 4 {
 		return 0, false
 	}
 	ihl := int(packet[0]&0x0f) * 4
-	if ihl < header.IPv4MinimumSize || len(packet) < ihl+header.TCPMinimumSize {
+	if ihl < header.IPv4MinimumSize {
+		return 0, false
+	}
+	minTransportSize := 0
+	switch packet[9] {
+	case uint8(header.TCPProtocolNumber):
+		minTransportSize = header.TCPMinimumSize
+	case uint8(header.UDPProtocolNumber):
+		minTransportSize = header.UDPMinimumSize
+	default:
+		return 0, false
+	}
+	if len(packet) < ihl+minTransportSize {
 		return 0, false
 	}
 	return uint16(packet[ihl])<<8 | uint16(packet[ihl+1]), true
@@ -281,7 +294,7 @@ type tcpStack struct {
 func newTCPStack(tun *tunnel.Tunnel, logger *slog.Logger) (*tcpStack, error) {
 	vip := tun.VIP().To4()
 	if vip == nil {
-		return nil, errors.New("TCP stack requires an IPv4 tunnel address")
+		return nil, errors.New("IP stack requires an IPv4 tunnel address")
 	}
 	endpoint := &linkEndpoint{
 		tun:    tun,
@@ -289,15 +302,18 @@ func newTCPStack(tun *tunnel.Tunnel, logger *slog.Logger) (*tcpStack, error) {
 		routes: make(map[uint16]dataRoute),
 	}
 	gstack := stack.New(stack.Options{
-		NetworkProtocols:   []stack.NetworkProtocolFactory{ipv4.NewProtocol},
-		TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol},
-		HandleLocal:        true,
+		NetworkProtocols: []stack.NetworkProtocolFactory{ipv4.NewProtocol},
+		TransportProtocols: []stack.TransportProtocolFactory{
+			tcp.NewProtocol,
+			udp.NewProtocol,
+		},
+		HandleLocal: true,
 	})
 	qdisc := fifo.New(endpoint, 1, outboundQueueLen)
 	if err := gstack.CreateNICWithOptions(nicID, endpoint, stack.NICOptions{QDisc: qdisc}); err != nil {
 		qdisc.Close()
 		gstack.Destroy()
-		return nil, fmt.Errorf("create TCP stack NIC: %s", err)
+		return nil, fmt.Errorf("create IP stack NIC: %s", err)
 	}
 	addr := tcpip.AddrFromSlice(vip)
 	protoAddr := tcpip.ProtocolAddress{
@@ -306,7 +322,7 @@ func newTCPStack(tun *tunnel.Tunnel, logger *slog.Logger) (*tcpStack, error) {
 	}
 	if err := gstack.AddProtocolAddress(nicID, protoAddr, stack.AddressProperties{}); err != nil {
 		gstack.Destroy()
-		return nil, fmt.Errorf("add TCP stack address: %s", err)
+		return nil, fmt.Errorf("add IP stack address: %s", err)
 	}
 	sack := tcpip.TCPSACKEnabled(true)
 	if err := gstack.SetTransportProtocolOption(tcp.ProtocolNumber, &sack); err != nil {
@@ -339,6 +355,15 @@ func (s *tcpStack) dial(ctx context.Context, remote net.IP, srcPort, dstPort uin
 	dialCtx, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
 	return gonet.DialTCPWithBind(dialCtx, s.stack, localAddr, remoteAddr, ipv4.ProtocolNumber)
+}
+
+func (s *tcpStack) dialUDP(ctx context.Context, remote net.IP, srcPort, dstPort uint16) (*gonet.UDPConn, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	localAddr := tcpip.FullAddress{NIC: nicID, Addr: tcpip.AddrFromSlice(s.vip), Port: srcPort}
+	remoteAddr := tcpip.FullAddress{NIC: nicID, Addr: tcpip.AddrFromSlice(remote.To4()), Port: dstPort}
+	return gonet.DialUDP(s.stack, &localAddr, &remoteAddr, ipv4.ProtocolNumber)
 }
 
 func (s *tcpStack) release(port uint16) {
@@ -397,5 +422,18 @@ type managedTCPConn struct {
 func (c *managedTCPConn) Close() error {
 	err := c.TCPConn.Close()
 	c.closeOnce.Do(func() { c.stack.releaseLater(c.port) })
+	return err
+}
+
+type managedUDPConn struct {
+	*gonet.UDPConn
+	stack     *tcpStack
+	port      uint16
+	closeOnce sync.Once
+}
+
+func (c *managedUDPConn) Close() error {
+	err := c.UDPConn.Close()
+	c.closeOnce.Do(func() { c.stack.release(c.port) })
 	return err
 }

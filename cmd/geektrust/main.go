@@ -121,7 +121,7 @@ func cmdRun(ctx context.Context, cfg *config.Config, logger *slog.Logger, args [
 	manager := tunnel.NewManager(provider, logger)
 	defer manager.Close()
 	dialer := &l3.Dialer{Manager: manager, Provider: provider, Logger: logger}
-	res := resolver.New(provider, cfg.DNS)
+	res := resolver.New(provider, dialer)
 
 	srv := inbound.New(cfg.Inbound, res, dialer, logger)
 	return srv.Run(ctx)
@@ -131,6 +131,9 @@ func printSummary(cred *session.Credential) {
 	fmt.Printf("sid:       %s (redacted)\n", session.ShortSID(cred.SID))
 	fmt.Printf("device_id: %s\n", cred.DeviceID)
 	fmt.Printf("gateways:  %s\n", strings.Join(cred.Gateways, ", "))
+	if len(cred.DNS) > 0 {
+		fmt.Printf("dns:       %s (through tunnel)\n", strings.Join(cred.DNS, ", "))
+	}
 	apps := make(map[string]bool)
 	for _, r := range cred.Policy.DomainRules {
 		apps[r.AppID] = true
@@ -192,17 +195,17 @@ func cmdDial(ctx context.Context, cfg *config.Config, logger *slog.Logger, args 
 	}
 
 	provider := session.NewProvider(cfg, logger, smsPrompt)
+	manager := tunnel.NewManager(provider, logger)
+	defer manager.Close()
+	dialer := &l3.Dialer{Manager: manager, Provider: provider, Logger: logger}
+
 	// Resolve exactly like the inbound layer: exact domain mapping first,
-	// then DNS-resolved IP policy, with domain wildcards as a fallback.
-	res := resolver.New(provider, cfg.DNS)
+	// then public DNS/IP policy and tunneled split-horizon DNS fallback.
+	res := resolver.New(provider, dialer)
 	target, err := res.Resolve(ctx, host, port)
 	if err != nil {
 		return err
 	}
-
-	manager := tunnel.NewManager(provider, logger)
-	defer manager.Close()
-	dialer := &l3.Dialer{Manager: manager, Provider: provider, Logger: logger}
 
 	start := time.Now()
 	conn, err := dialer.Dial(ctx, target.IP, port, target.AppID, target.Domain)
