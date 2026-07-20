@@ -70,14 +70,12 @@ func TestParseTCPSkipsOptions(t *testing.T) {
 }
 
 func TestBuildAuthRequestIPShape(t *testing.T) {
-	body, err := buildAuthRequestIP(
-		"unit_sid", "681165d0-1c77-11ed-8650-cd35a51aa42a", "84B5B45FE73EC0036C3E97717308447F",
-		"10.15.45.163", 443, net.IPv4(10, 19, 240, 43).To4(), 30001, 7)
+	body, err := buildAuthRequestIP("sid", "681165d0-1c77-11ed-8650-cd35a51aa42a", "84B5B45FE73EC0036C3E97717308447F", "10.15.45.163", 443, net.IPv4(10, 19, 240, 43).To4(), 30001, 1, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	// Field order is protocol-significant (TECHNICAL.md §6.2).
+	// Field order is protocol-significant.
 	dec := json.NewDecoder(strings.NewReader(string(body)))
 	dec.UseNumber()
 	tok, err := dec.Token() // {
@@ -145,5 +143,38 @@ func TestBuildAuthRequestIPShape(t *testing.T) {
 	wantPrefix := fmt.Sprintf("%X-", md5.Sum([]byte("84B5B45FE73EC0036C3E97717308447F")))
 	if !strings.HasPrefix(cid, wantPrefix) {
 		t.Errorf("connectionId = %q, want prefix %q", cid, wantPrefix)
+	}
+
+	// domain is omitted when empty; when set it sits between ip and procHash.
+	withDomain, err := buildAuthRequestIP("sid", "app", "84B5B45FE73EC0036C3E97717308447F",
+		"180.101.49.44", 443, net.IPv4(10, 19, 240, 43).To4(), 30002, 2, "www.baidu.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pd map[string]any
+	if err := json.Unmarshal(withDomain, &pd); err != nil {
+		t.Fatal(err)
+	}
+	if pd["domain"] != "www.baidu.com" {
+		t.Errorf("domain = %v", pd["domain"])
+	}
+	dec2 := json.NewDecoder(strings.NewReader(string(withDomain)))
+	dec2.Token()
+	var keys2 []string
+	for dec2.More() {
+		k, _ := dec2.Token()
+		keys2 = append(keys2, k.(string))
+		var skip json.RawMessage
+		dec2.Decode(&skip)
+	}
+	want2 := []string{"sid", "appId", "url", "deviceId", "connectionId", "env",
+		"conntrackHash", "lang", "ip", "domain", "procHash", "xRequestSig"}
+	if len(keys2) != len(want2) {
+		t.Fatalf("keys with domain = %v", keys2)
+	}
+	for i := range want2 {
+		if keys2[i] != want2[i] {
+			t.Fatalf("key[%d] = %q, want %q", i, keys2[i], want2[i])
+		}
 	}
 }

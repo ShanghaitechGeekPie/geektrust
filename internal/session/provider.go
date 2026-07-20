@@ -15,9 +15,8 @@ import (
 	"geektrust/internal/sdpc"
 )
 
-// DefaultGateways are the well-known external gateway lines
-// (TECHNICAL.md §2.1), used when neither config nor clientResource provides
-// any.
+// DefaultGateways are the well-known external gateway lines, used when
+// neither config nor clientResource provides any.
 var DefaultGateways = []string{"119.78.254.241:441", "59.78.171.241:441"}
 
 // Credential is everything the tunnel and resolver need from a live session.
@@ -28,18 +27,21 @@ type Credential struct {
 	Cookies   []*http.Cookie
 	Gateways  []string
 	DNS       []string
-	DomainMap map[string]sdpc.AppEndpoint
-	IPApps    map[string]string
-	AppID     string
+	// Policy is the full routing policy (domain/IP/CIDR × port → appId)
+	// from clientResource.
+	Policy *sdpc.Resource
+	AppID  string
 }
 
-// SMSPrompter asks the user for the SMS verification code. It is only invoked
-// on the first login of a new device_id (PLAN.md §4).
+// SMSPrompter asks the user for the SMS verification code. It runs whenever
+// the controller demands SMS — the first login of a new device_id, or a
+// later full login the server refuses to waive. With a nil prompt, such a
+// login fails.
 type SMSPrompter func(ctx context.Context) (string, error)
 
-// CredentialProvider is the login↔tunnel contract (PLAN.md §2.1): consumers
-// (tunnel, resolver, l3) only ever ask for valid credentials; the provider
-// hides restoration, refresh and silent re-login.
+// CredentialProvider is the login↔tunnel contract: consumers (tunnel,
+// resolver, l3) only ever ask for valid credentials; the provider hides
+// restoration, refresh and silent re-login.
 type CredentialProvider interface {
 	// Credential returns current valid credentials, re-logging in if needed.
 	Credential(ctx context.Context) (*Credential, error)
@@ -47,9 +49,9 @@ type CredentialProvider interface {
 	Invalidate()
 }
 
-// Provider implements the CredentialProvider contract (PLAN.md §2.1): it
-// returns valid session credentials, restoring a persisted session or
-// re-logging in silently (passkey; trusted devices need no SMS).
+// Provider implements CredentialProvider: it returns valid session
+// credentials, restoring a persisted session or re-logging in silently
+// when the controller does not request SMS.
 type Provider struct {
 	cfg    *config.Config
 	logger *slog.Logger
@@ -71,8 +73,8 @@ type refreshCall struct {
 	err  error
 }
 
-// NewProvider builds a credential provider. prompt may be nil only if SMS
-// will never be needed (an already-trusted device_id).
+// NewProvider builds a credential provider. prompt may be nil; a login that
+// requires SMS then returns an error.
 func NewProvider(cfg *config.Config, logger *slog.Logger, prompt SMSPrompter) *Provider {
 	return &Provider{
 		cfg:    cfg,
@@ -119,9 +121,22 @@ func (p *Provider) Credential(ctx context.Context) (*Credential, error) {
 }
 
 // ForceLogin performs a full login, bypassing any persisted session (used by
-// the `login -fresh` command). It joins the single-flight refresh so
-// concurrent callers never trigger two logins.
+// the `login -fresh` command). It waits out any in-flight refresh first so
+// the forced acquisition cannot be shadowed by a stale restore.
 func (p *Provider) ForceLogin(ctx context.Context) (*Credential, error) {
+	for {
+		p.mu.Lock()
+		call := p.refreshing
+		p.mu.Unlock()
+		if call == nil {
+			break
+		}
+		select {
+		case <-call.done:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
 	p.Invalidate()
 	return p.Credential(ctx)
 }
@@ -136,8 +151,8 @@ func (p *Provider) Invalidate() {
 	p.mu.Unlock()
 }
 
-// CheckLoop periodically verifies the session with onlineInfo and re-logs in
-// ahead of failure (PLAN.md §6.2). Run in its own goroutine.
+// CheckLoop periodically verifies the session with onlineInfo and re-logs
+// in ahead of failure. Run in its own goroutine.
 func (p *Provider) CheckLoop(ctx context.Context, interval time.Duration) {
 	if interval <= 0 {
 		interval = 5 * time.Minute
@@ -166,6 +181,15 @@ func (p *Provider) CheckLoop(ctx context.Context, interval time.Duration) {
 			p.logger.Warn("onlineInfo probe failed; retrying next tick", "err", err)
 			continue
 		case err == nil && info.IsOnline:
+			continue
+		}
+		// Drop the credential only if it is still the one we probed: a
+		// concurrent refresh may have already replaced it, and invalidating
+		// the fresh credential would force yet another login.
+		p.mu.Lock()
+		stale := p.cur != cred || p.sdpc != sc
+		p.mu.Unlock()
+		if stale {
 			continue
 		}
 		p.logger.Warn("session no longer online, re-logging in silently", "err", err)
@@ -199,7 +223,7 @@ func (p *Provider) acquire(ctx context.Context) (*Credential, error) {
 }
 
 // restore validates the persisted state via onlineInfo and rebuilds the
-// resource maps. Returns (nil, nil) when there is nothing to restore.
+// routing policy. Returns (nil, nil) when there is nothing to restore.
 func (p *Provider) restore(ctx context.Context) (*Credential, error) {
 	st, err := p.store.Load()
 	if err != nil || st == nil {
@@ -240,7 +264,7 @@ func (p *Provider) restore(ctx context.Context) (*Credential, error) {
 }
 
 // login runs the full sequence: IDS passkey → CAS → reportEnv → authCheck
-// (→ SMS on new devices) → session exchange → clientResource.
+// (→ SMS when requested) → session exchange → clientResource.
 func (p *Provider) login(ctx context.Context) (*Credential, error) {
 	ks, err := idsauth.LoadKeystore(p.cfg.Keystore)
 	if err != nil {
@@ -277,7 +301,7 @@ func (p *Provider) login(ctx context.Context) (*Credential, error) {
 	if needSMS {
 		sidTicket, err = p.smsFlow(ctx, sc)
 	} else {
-		p.logger.Info("device is trusted, no SMS required")
+		p.logger.Info("controller did not request SMS")
 		sidTicket, err = sc.TicketExchange(ctx)
 	}
 	if err != nil {
@@ -300,13 +324,19 @@ func (p *Provider) login(ctx context.Context) (*Credential, error) {
 	return p.finishLogin(ctx, sc, nil)
 }
 
-// smsFlow handles the one-time new-device SMS verification (TECHNICAL.md §3.6).
+// smsFlow completes controller-requested SMS verification.
 func (p *Provider) smsFlow(ctx context.Context, sc *sdpc.Client) (string, error) {
 	if p.prompt == nil {
-		return "", errors.New("this device_id is not trusted yet and requires SMS verification, but no prompt is available")
+		return "", errors.New("the controller requires SMS verification, but no prompt is available")
 	}
 	if err := sc.SendSMS(ctx); err != nil {
-		return "", fmt.Errorf("send sms: %w", err)
+		// 75500401: a code was already sent and is still valid — verify it
+		// instead of failing (a retried login must not demand a new SMS).
+		var apiErr *sdpc.APIError
+		if !errors.As(err, &apiErr) || apiErr.Code != sdpc.CodeSMSStillValid {
+			return "", fmt.Errorf("send sms: %w", err)
+		}
+		p.logger.Info("SMS code still valid from a previous attempt; reusing it")
 	}
 	code, err := p.prompt(ctx)
 	if err != nil {
@@ -326,7 +356,8 @@ func (p *Provider) finishLogin(ctx context.Context, sc *sdpc.Client, gatewaysOve
 	if err != nil {
 		return nil, fmt.Errorf("clientResource: %w", err)
 	}
-
+	p.logger.Info("resource policy loaded",
+		"domain_rules", len(res.DomainRules), "suffix_rules", len(res.SuffixRules), "ip_rules", len(res.IPRules))
 	gateways := p.cfg.Gateways
 	if len(gateways) == 0 {
 		gateways = res.Gateways
@@ -349,8 +380,7 @@ func (p *Provider) finishLogin(ctx context.Context, sc *sdpc.Client, gatewaysOve
 		Cookies:   sc.Cookies(),
 		Gateways:  gateways,
 		DNS:       dns,
-		DomainMap: res.DomainMap,
-		IPApps:    res.IPApps,
+		Policy:    res,
 		AppID:     p.cfg.AppID,
 	}
 

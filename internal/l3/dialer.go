@@ -14,16 +14,16 @@ import (
 
 const (
 	// dialAttempts/dialRetryDelay implement the churn backoff: the gateway
-	// briefly refuses new connections (no SYN-ACK, or auth code 10000005
-	// "address check error") after rapid connect churn (TECHNICAL.md §12.2;
-	// reference: 4 attempts, 1.5s apart). The delay scales with the attempt
-	// (1.5s, 3s, 4.5s) since churn windows outlast a fixed pause.
+	// briefly refuses new connections (no SYN-ACK) after rapid connect
+	// churn. The delay scales with the attempt (1.5s, 3s, 4.5s) since
+	// churn windows outlast a fixed pause. Persistent auth rejections
+	// (e.g. address check) exit after one attempt instead.
 	dialAttempts   = 4
 	dialRetryDelay = 1500 * time.Millisecond
 )
 
-// Dialer establishes TCP connections through the tunnel (PLAN.md §2.1, §5.2).
-// Inbound proxies depend only on its Dial method and never see aTrust details.
+// Dialer establishes TCP connections through the tunnel. Inbound proxies
+// depend only on its Dial method and never see aTrust details.
 type Dialer struct {
 	Manager  *tunnel.Manager
 	Provider session.CredentialProvider
@@ -31,9 +31,12 @@ type Dialer struct {
 }
 
 // Dial connects to an already-resolved tunnel IP:port (domain resolution
-// happens in the inbound layer, PLAN.md §2.1). Failures are retried with the
-// churn backoff; line-switch auth codes rotate the gateway line.
-func (d *Dialer) Dial(ctx context.Context, ip string, port int) (net.Conn, error) {
+// happens in the inbound layer). appID is the authorizing application
+// chosen by the resolver; if empty, it is looked up from the IP policy.
+// domain carries the original hostname for wildcard-authorized targets.
+// Failures are retried with the churn backoff; line-switch auth codes
+// rotate the gateway line.
+func (d *Dialer) Dial(ctx context.Context, ip string, port int, appID, domain string) (net.Conn, error) {
 	// Validate before any tunnel work: the data plane is IPv4-only and the
 	// wire narrows the port to uint16 (a wrapped value would mismatch the
 	// auth request's destPort).
@@ -58,7 +61,7 @@ func (d *Dialer) Dial(ctx context.Context, ip string, port int) (net.Conn, error
 				return nil, ctx.Err()
 			}
 		}
-		conn, err := d.dialOnce(ctx, ip, port)
+		conn, err := d.dialOnce(ctx, ip, port, appID, domain)
 		if err == nil {
 			return conn, nil
 		}
@@ -84,14 +87,14 @@ func (d *Dialer) Dial(ctx context.Context, ip string, port int) (net.Conn, error
 type AuthRejectedError struct {
 	Code       int64
 	Message    string
-	SwitchLine bool // gateway asked for another line (TECHNICAL.md §11.2)
+	SwitchLine bool // gateway asked for another line
 }
 
 func (e *AuthRejectedError) Error() string {
 	return fmt.Sprintf("per-conn auth rejected: code %d: %s", e.Code, e.Message)
 }
 
-func (d *Dialer) dialOnce(ctx context.Context, ip string, port int) (net.Conn, error) {
+func (d *Dialer) dialOnce(ctx context.Context, ip string, port int, appID, domain string) (net.Conn, error) {
 	tun, err := d.Manager.Tunnel(ctx)
 	if err != nil {
 		return nil, err
@@ -100,10 +103,8 @@ func (d *Dialer) dialOnce(ctx context.Context, ip string, port int) (net.Conn, e
 	if err != nil {
 		return nil, err
 	}
-
-	appID := cred.AppID
-	if mapped, ok := cred.IPApps[ip]; ok && mapped != "" {
-		appID = mapped
+	if appID == "" {
+		appID = cred.Policy.AppIDFor(net.ParseIP(ip).To4(), port, cred.AppID)
 	}
 
 	srcPort, err := tun.AllocSrcPort()
@@ -111,7 +112,7 @@ func (d *Dialer) dialOnce(ctx context.Context, ip string, port int) (net.Conn, e
 		return nil, err
 	}
 	authID := tun.NextAuthID()
-	body, err := buildAuthRequestIP(cred.SID, appID, cred.DeviceID, ip, port, tun.VIP(), srcPort, authID)
+	body, err := buildAuthRequestIP(cred.SID, appID, cred.DeviceID, ip, port, tun.VIP(), srcPort, authID, domain)
 	if err != nil {
 		return nil, err
 	}

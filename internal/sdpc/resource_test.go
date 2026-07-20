@@ -2,6 +2,7 @@ package sdpc
 
 import (
 	"encoding/json"
+	"net"
 	"testing"
 )
 
@@ -30,13 +31,27 @@ const sampleResource = `{
                   {"protocol": "tcp", "port": "1-65535", "host": "10.20.0.0/16"},
                   {"protocol": "tcp", "port": "80", "host": "*.wildcard.example"}
                 ]
+              }
+            ]
+          },
+          {
+            "apps": [
+              {
+                "id": "8b541db0-f776-11ec-9330-f55121c908de",
+                "name": "外网资源",
+                "addressList": [
+                  {"protocol": "tcp", "port": "1-65535", "host": "0.0.0.0/0"},
+                  {"protocol": "tcp", "port": "1-65535", "host": "*.cn"},
+                  {"protocol": "tcp", "port": "1-65535", "host": "*.org"}
+                ]
               },
               {
-                "id": "e335af60-5a60-11ed-838c-bbadf788d6f3",
-                "name": "security agent (shares the library IP)",
+                "id": "64569440-f776-11ec-9330-f55121c908de",
+                "name": "内网资源段",
                 "addressList": [
-                  {"protocol": "tcp", "port": "443", "host": "10.15.45.163"},
-                  {"protocol": "tcp", "port": "443", "host": "library.shanghaitech.edu.cn"}
+                  {"protocol": "tcp", "port": "1-65535", "host": "10.0.0.0-10.255.255.255"},
+                  {"protocol": "tcp", "port": "1-65535", "host": "*.com"},
+                  {"protocol": "tcp", "port": "1-65535", "host": "*.org"}
                 ]
               }
             ]
@@ -71,8 +86,8 @@ const sampleResource = `{
   }
 }`
 
-func TestParseResource(t *testing.T) {
-	// doJSON hands parseResource the envelope's data payload, so unwrap first.
+func parseSample(t *testing.T) *Resource {
+	t.Helper()
 	var env struct {
 		Data json.RawMessage `json:"data"`
 	}
@@ -84,33 +99,112 @@ func TestParseResource(t *testing.T) {
 		t.Fatal(err)
 	}
 	c := &Client{BaseURL: "https://vpn.shanghaitech.edu.cn", Platform: "Mac"}
-	res := c.parseResource(&raw)
+	return c.parseResource(&raw)
+}
 
-	// Domain → first internal IP of the same app (TECHNICAL.md §4.2).
-	lib, ok := res.DomainMap["library.shanghaitech.edu.cn"]
-	if !ok || lib.IP != "10.15.45.163" || lib.AppID != "681165d0-1c77-11ed-8650-cd35a51aa42a" {
-		t.Errorf("library mapping = %+v", lib)
+func TestDomainRules(t *testing.T) {
+	res := parseSample(t)
+
+	// library:443 → 电子资源 with its internal IP.
+	rule, ok := res.MatchDomain("library.shanghaitech.edu.cn", 443)
+	if !ok || rule.IP != "10.15.45.163" || rule.AppID != "681165d0-1c77-11ed-8650-cd35a51aa42a" {
+		t.Fatalf("library:443 = %+v, %v", rule, ok)
 	}
-	// "@" prefix is stripped before classification.
-	egate, ok := res.DomainMap["egate.shanghaitech.edu.cn"]
-	if !ok || egate.IP != "10.15.44.192" || egate.AppID != "c2fe8720-1c77-11ed-8650-cd35a51aa42a" {
-		t.Errorf("egate mapping = %+v", egate)
+	// @ prefix stripped.
+	rule, ok = res.MatchDomain("egate.shanghaitech.edu.cn", 443)
+	if !ok || rule.IP != "10.15.44.192" {
+		t.Fatalf("egate:443 = %+v, %v", rule, ok)
 	}
-	// Wildcard/range hosts are never mapped.
-	if _, ok := res.DomainMap["*.wildcard.example"]; ok {
-		t.Error("wildcard host must not be mapped")
+	// library:80 has no domain rule (电子资源 authorizes 443 only) — the
+	// real client falls through to IP policy for it.
+	if _, ok := res.MatchDomain("library.shanghaitech.edu.cn", 80); ok {
+		t.Fatal("library:80 must not match a domain rule")
 	}
-	if _, ok := res.DomainMap["10.20.0.0/16"]; ok {
-		t.Error("CIDR host must not be mapped as domain")
+	// Wildcards are not mapped.
+	if _, ok := res.MatchDomain("wildcard.example", 80); ok {
+		t.Fatal("wildcard host must not be mapped")
 	}
-	// Direct-IP lookup for per-connection auth appId: first-wins. The sample
-	// security-agent app also lists 10.15.45.163 later; the gateway rejects
-	// dials under the wrong app (code 10000005), so 电子资源 must keep it.
-	if res.IPApps["10.15.45.163"] != "681165d0-1c77-11ed-8650-cd35a51aa42a" {
-		t.Errorf("IPApps[10.15.45.163] = %q", res.IPApps["10.15.45.163"])
+}
+
+func TestIPRules(t *testing.T) {
+	res := parseSample(t)
+
+	cases := []struct {
+		ip    string
+		port  int
+		appID string
+	}{
+		// Exact IP beats the 10.0.0.0-10.255.255.255 range and 0.0.0.0/0.
+		{"10.15.45.163", 443, "681165d0-1c77-11ed-8650-cd35a51aa42a"},
+		// Same IP, unauthorized port: falls to the range rule (内网资源段).
+		{"10.15.45.163", 80, "64569440-f776-11ec-9330-f55121c908de"},
+		// CIDR app entry.
+		{"10.20.1.2", 8080, "c2fe8720-1c77-11ed-8650-cd35a51aa42a"},
+		// Internal range outside the CIDR.
+		{"10.99.0.1", 22, "64569440-f776-11ec-9330-f55121c908de"},
+		// Public IP → catch-all 外网资源.
+		{"119.78.254.179", 443, "8b541db0-f776-11ec-9330-f55121c908de"},
+		{"8.8.8.8", 53, "8b541db0-f776-11ec-9330-f55121c908de"},
+	}
+	for _, tc := range cases {
+		rule, ok := res.MatchIP(net.ParseIP(tc.ip), tc.port)
+		if !ok {
+			t.Errorf("%s:%d: no match", tc.ip, tc.port)
+			continue
+		}
+		if rule.AppID != tc.appID {
+			t.Errorf("%s:%d appID = %s, want %s", tc.ip, tc.port, rule.AppID, tc.appID)
+		}
 	}
 
-	// Gateways: default port appended, {{sdpcHost}} substituted, deduped.
+	// Port outside every rule → no match (AppIDFor falls back).
+	if _, ok := res.MatchIP(net.ParseIP("10.20.1.2"), 0); ok {
+		t.Error("port 0 must not match 1-65535")
+	}
+	if got := res.AppIDFor(net.ParseIP("1.2.3.4"), 65536, "fallback"); got != "fallback" {
+		t.Errorf("AppIDFor out-of-range port = %q, want fallback", got)
+	}
+}
+
+func TestIPRuleRangeUsesExactSpan(t *testing.T) {
+	res := &Resource{IPRules: []IPRule{
+		{
+			IPMin: net.ParseIP("10.0.0.1"), IPMax: net.ParseIP("10.0.0.200"),
+			AppID: "broad", Port: PortRange{Min: 1, Max: 65535}, Proto: "tcp",
+		},
+		{
+			IPMin: net.ParseIP("10.0.0.50"), IPMax: net.ParseIP("10.0.0.179"),
+			AppID: "narrow", Port: PortRange{Min: 1, Max: 65535}, Proto: "tcp",
+		},
+	}}
+	rule, ok := res.MatchIP(net.ParseIP("10.0.0.100"), 443)
+	if !ok || rule.AppID != "narrow" {
+		t.Fatalf("range match = %+v, %v", rule, ok)
+	}
+}
+
+func TestSuffixRules(t *testing.T) {
+	res := parseSample(t)
+
+	// *.org appears in both catch-all apps; appList order decides (外网资源
+	// is first in the sample's second group).
+	rule, ok := res.MatchSuffix("anything.org", 443)
+	if !ok || rule.AppID != "8b541db0-f776-11ec-9330-f55121c908de" {
+		t.Fatalf("anything.org = %+v, %v", rule, ok)
+	}
+	if _, ok := res.MatchSuffix("no.matching.tld", 443); ok {
+		t.Fatal("unmatched suffix must not match")
+	}
+	// Case-insensitive host.
+	if _, ok := res.MatchSuffix("WWW.EXAMPLE.ORG", 80); !ok {
+		t.Fatal("suffix match must be case-insensitive")
+	}
+}
+
+func TestGatewaysAndDNS(t *testing.T) {
+	res := parseSample(t)
+
+	// Default port appended, {{sdpcHost}} substituted, deduped.
 	wantGW := []string{"119.78.254.241:441", "59.78.171.241:441", "vpn.shanghaitech.edu.cn:441"}
 	if len(res.Gateways) != len(wantGW) {
 		t.Fatalf("gateways = %v, want %v", res.Gateways, wantGW)
@@ -120,10 +214,25 @@ func TestParseResource(t *testing.T) {
 			t.Errorf("gateways[%d] = %q, want %q", i, res.Gateways[i], wantGW[i])
 		}
 	}
-
-	// DNS: only valid IPs survive.
+	// Only valid IPs survive.
 	if len(res.DNS) != 1 || res.DNS[0] != "10.0.0.53" {
 		t.Errorf("dns = %v", res.DNS)
+	}
+}
+
+func TestParsePortRange(t *testing.T) {
+	cases := map[string]PortRange{
+		"443":       {443, 443},
+		"1-65535":   {1, 65535},
+		"8000-9000": {8000, 9000},
+		"":          {0, 65535},
+		"all":       {0, 65535},
+		"junk":      {0, 65535},
+	}
+	for in, want := range cases {
+		if got := parsePortRange(in); got != want {
+			t.Errorf("parsePortRange(%q) = %+v, want %+v", in, got, want)
+		}
 	}
 }
 

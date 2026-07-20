@@ -17,11 +17,11 @@ import (
 )
 
 const (
-	// handshakeTimeout bounds the SYN → SYN-ACK wait (reference: 8s).
+	// handshakeTimeout bounds the SYN → SYN-ACK wait.
 	handshakeTimeout = 8 * time.Second
-	// inQueue bounds per-connection downlink packets awaiting processing.
-	// When full, packets are dropped; the remote TCP retransmits since we
-	// never ACK them. Dropping keeps the shared reader loop alive.
+	// inQueue bounds per-connection pending downlink packets. When full,
+	// packets are dropped; the remote TCP retransmits since we never ACK
+	// them. Dropping keeps the shared reader loop alive.
 	inQueue = 256
 	// recvCap bounds buffered unread receive data. At the cap we advertise
 	// a zero window until the application drains (backpressure); without it
@@ -34,12 +34,14 @@ const (
 // tunnelLink is the slice of *tunnel.Tunnel a TCP endpoint needs. Narrowing
 // it keeps the endpoint testable without a live gateway connection.
 type tunnelLink interface {
-	SendData(token string, pkt []byte) error
+	// SendData writes one packet; deadline bounds the serialized socket
+	// write (zero = the tunnel's global timeout only).
+	SendData(token string, pkt []byte, deadline time.Time) error
 	Dead() <-chan struct{}
 	UnregisterConn(srcPort uint16)
 }
 
-// TCPConn is a userspace TCP endpoint carried by the tunnel (TECHNICAL.md §8).
+// TCPConn is a userspace TCP endpoint carried by the tunnel.
 // It implements net.Conn for the inbound proxies and tunnel.PacketSink for
 // downlink dispatch.
 //
@@ -119,7 +121,7 @@ func (c *TCPConn) DeliverPacket(pkt []byte) {
 	}
 }
 
-// run owns the receive state machine (TECHNICAL.md §8.1, §8.3).
+// run owns the receive state machine.
 func (c *TCPConn) run() {
 	defer close(c.done)
 	for {
@@ -143,7 +145,7 @@ func (c *TCPConn) onPacket(pkt []byte) {
 
 	c.seqMu.Lock()
 	if seg.flags&flagSYN != 0 && !c.synSeen {
-		// SYN-ACK completes the handshake (TECHNICAL.md §8.1).
+		// SYN-ACK completes the handshake.
 		c.synSeen = true
 		c.peerSeq = seg.seq + 1
 		c.seqMu.Unlock()
@@ -177,13 +179,13 @@ func (c *TCPConn) onPacket(pkt []byte) {
 		}
 	}
 	if needAck {
-		_ = c.sendSegmentLocked(flagACK, nil)
+		_ = c.sendSegmentLocked(flagACK, nil, time.Time{})
 	}
 	c.seqMu.Unlock()
 }
 
-// receivePayload reassembles in-order/out-of-order/overlapping data
-// (TECHNICAL.md §8.3). Caller holds seqMu; returns whether an ACK is owed.
+// receivePayload reassembles in-order/out-of-order/overlapping data.
+// Caller holds seqMu; returns whether an ACK is owed.
 func (c *TCPConn) receivePayload(seq uint32, payload []byte) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -316,13 +318,15 @@ func (c *TCPConn) rxWinLocked() uint16 {
 // sendSegmentLocked builds and sends one TCP segment. Caller holds seqMu.
 // Before the per-conn auth delivers a token there is nothing to send under;
 // skip instead of emitting a malformed frame (e.g. Close during cleanup).
-func (c *TCPConn) sendSegmentLocked(flags byte, payload []byte) error {
+// deadline is non-zero only for application data written by Write. TCP
+// control traffic must remain writable after the application's deadline.
+func (c *TCPConn) sendSegmentLocked(flags byte, payload []byte, deadline time.Time) error {
 	if c.token == "" {
 		return errors.New("no connect token yet")
 	}
 	seg := tcpSegment(c.vip, c.dstIP, c.srcPort, c.dstPort, c.mySeq, c.peerSeq,
 		flags, c.rxWinLocked(), payload)
-	return c.tun.SendData(c.token, ipPacket(c.vip, c.dstIP, 6, seg))
+	return c.tun.SendData(c.token, ipPacket(c.vip, c.dstIP, 6, seg), deadline)
 }
 
 // handshake drives the client side of the three-way handshake.
@@ -333,7 +337,7 @@ func (c *TCPConn) handshake(ctx context.Context) error {
 	}
 	c.seqMu.Lock()
 	c.mySeq = binary.BigEndian.Uint32(isn[:])
-	err := c.sendSegmentLocked(flagSYN, nil)
+	err := c.sendSegmentLocked(flagSYN, nil, time.Time{})
 	c.mySeq++ // SYN consumes one sequence number
 	c.seqMu.Unlock()
 	if err != nil {
@@ -346,14 +350,14 @@ func (c *TCPConn) handshake(ctx context.Context) error {
 	case <-c.handshakeCh:
 	case <-hsCtx.Done():
 		// Gateways briefly refuse new connections under churn; surface as a
-		// plain error so the Dialer backs off and retries (TECHNICAL.md §12.2).
+		// plain error so the Dialer backs off and retries.
 		return errors.New("TCP handshake failed (no SYN-ACK)")
 	case <-c.done:
 		return io.EOF
 	}
 
 	c.seqMu.Lock()
-	err = c.sendSegmentLocked(flagACK, nil)
+	err = c.sendSegmentLocked(flagACK, nil, time.Time{})
 	c.seqMu.Unlock()
 	if err != nil {
 		return fmt.Errorf("send handshake ACK: %w", err)
@@ -417,15 +421,14 @@ func (c *TCPConn) Read(p []byte) (int, error) {
 // sendWindowUpdate ACKs with the freshly opened window after a drain.
 func (c *TCPConn) sendWindowUpdate() {
 	c.seqMu.Lock()
-	_ = c.sendSegmentLocked(flagACK, nil)
+	_ = c.sendSegmentLocked(flagACK, nil, time.Time{})
 	c.seqMu.Unlock()
 }
 
-// Write streams data as PSH+ACK segments of at most MSS bytes
-// (TECHNICAL.md §8.2). The write deadline is re-checked between segments, so
-// a concurrent SetWriteDeadline takes effect at the next segment boundary; a
-// write already inside the serialized tunnel write is bounded by the
-// tunnel's write timeout.
+// Write streams data as PSH+ACK segments of at most MSS bytes. The write
+// deadline bounds both the gaps between segments and each serialized tunnel
+// write, so a concurrent SetWriteDeadline takes effect at the next segment
+// and an expired deadline fails a blocked write.
 func (c *TCPConn) Write(p []byte) (int, error) {
 	c.seqMu.Lock()
 	defer c.seqMu.Unlock()
@@ -444,7 +447,7 @@ func (c *TCPConn) Write(p []byte) (int, error) {
 		if len(chunk) > MSS {
 			chunk = chunk[:MSS]
 		}
-		if err := c.sendSegmentLocked(flagPSH|flagACK, chunk); err != nil {
+		if err := c.sendSegmentLocked(flagPSH|flagACK, chunk, deadline); err != nil {
 			return written, err
 		}
 		c.mySeq += uint32(len(chunk))
@@ -454,14 +457,14 @@ func (c *TCPConn) Write(p []byte) (int, error) {
 	return written, nil
 }
 
-// Close sends FIN+ACK and unregisters the connection (TECHNICAL.md §8.4),
-// avoiding gateway-side conntrack buildup.
+// Close sends FIN+ACK and unregisters the connection, avoiding gateway-side
+// conntrack buildup.
 func (c *TCPConn) Close() error {
 	c.once.Do(func() {
 		c.seqMu.Lock()
 		if !c.writeClosed {
 			// Best effort: the tunnel may already be dead.
-			_ = c.sendSegmentLocked(flagFIN|flagACK, nil)
+			_ = c.sendSegmentLocked(flagFIN|flagACK, nil, time.Time{})
 			c.mySeq++
 			c.writeClosed = true
 		}

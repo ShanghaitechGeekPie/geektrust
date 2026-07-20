@@ -1,6 +1,5 @@
 // Package l3 implements the aTrust data plane: per-connection authentication
-// and a userspace TCP endpoint carried inside tunnel IPv4 packets
-// (TECHNICAL.md §6–§8; PLAN.md §5.2).
+// and a userspace TCP endpoint carried inside tunnel IPv4 packets.
 package l3
 
 import (
@@ -17,7 +16,7 @@ const (
 	flagACK = 0x10
 )
 
-// MSS is the maximum segment payload (reference: 1400).
+// MSS is the maximum segment payload; 1400 leaves headroom under the 1500-byte MTU.
 const MSS = 1400
 
 // ipv4HeaderLen is the fixed header size we emit (IHL=5, no options).
@@ -43,8 +42,8 @@ func checksum(data []byte) uint16 {
 }
 
 // tcpSegment builds a TCP segment with correct checksum (pseudo-header
-// included), matching the reference _tcp_segment: data offset 5, urgent 0.
-// win advertises the receive window (backpressure; TECHNICAL.md §8).
+// included): data offset 5, urgent 0. win advertises the receive window
+// (backpressure).
 func tcpSegment(srcIP, dstIP net.IP, sport, dport uint16, seq, ack uint32, flags byte, win uint16, payload []byte) []byte {
 	src4, dst4 := srcIP.To4(), dstIP.To4()
 	seg := make([]byte, tcpHeaderLen+len(payload))
@@ -73,8 +72,8 @@ func tcpSegment(srcIP, dstIP net.IP, sport, dport uint16, seq, ack uint32, flags
 	return seg
 }
 
-// ipPacket wraps a segment in an IPv4 header matching the reference
-// _ip_packet: 0x45, id 0x1234, DF, TTL 64.
+// ipPacket wraps a segment in an IPv4 header with fixed fields: 0x45,
+// id 0x1234, DF, TTL 64.
 func ipPacket(srcIP, dstIP net.IP, proto byte, segment []byte) []byte {
 	src4, dst4 := srcIP.To4(), dstIP.To4()
 	total := ipv4HeaderLen + len(segment)

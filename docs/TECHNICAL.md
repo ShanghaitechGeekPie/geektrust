@@ -70,7 +70,7 @@
 
 | 名称 | 说明 |
 |---|---|
-| `device_id` | 设备标识,32 位大写十六进制。规范值取 `MD5("atrust-headless-client-v1").upper()` = `84B5B45FE73EC0036C3E97717308447F`。**必须持久化、永不变更**,服务器据此记忆「受信设备」,避免重复短信验证。(参考脚本 `atrust_socks5.py` 中的兜底默认值 `83D23A2C…` 仅为占位,实际应使用持久化的固定值。) |
+| `device_id` | 设备标识,32 位大写十六进制。规范值取 `MD5("atrust-headless-client-v1").upper()` = `84B5B45FE73EC0036C3E97717308447F`。必须持久化并保持不变;更换后服务器会视为新设备。固定该值和复用会话可减少短信验证,但服务端仍可能在后续完整登录中再次要求短信。(参考脚本 `atrust_socks5.py` 中的兜底默认值 `83D23A2C…` 仅为占位。) |
 | `sid` | 会话 ID,形如 `<unitid>_<uuid>`(如 `9e700fcd-…_63c16989-…`),由 `sessionIdExchange` 通过 Set-Cookie 确立。隧道认证与每连接认证均使用它。 |
 | `sidTicket` | 一次性票据,来自 `checkcode`/`ticketExchange`,用于换取 `sid`。 |
 | `csrfToken` | 来自 `authConfig.data.security.csrfToken`,作为 `x-csrf-token` 头。 |
@@ -102,9 +102,9 @@ IDS passkey 登录 → CASTGC
 → GET /passport/v1/public/casLogin → 302 → IDS → 302 → /passport/v1/auth/cas?ticket=ST
 → 302 → /portal/shortcut.html?...&data={"ticket":"<casTicket>"}
 → POST /controller/v1/public/reportEnv          (前置,缺失则 authCheck 报 75599999)
-→ GET  /passport/v1/auth/authCheck              (受信设备直接通过;新设备 nextService=auth/sms)
-→ POST /passport/v1/auth/sms?action=sendsms     (仅新设备)
-→ POST /passport/v1/auth/sms?action=checkcode   (仅新设备) → sidTicket
+→ GET  /passport/v1/auth/authCheck              (服务端决定是否 nextService=auth/sms)
+→ POST /passport/v1/auth/sms?action=sendsms     (仅在 authCheck 要求时)
+→ POST /passport/v1/auth/sms?action=checkcode   (仅在 authCheck 要求时) → sidTicket
 → POST /passport/v1/public/sessionIdExchange    → 建立 sid 会话
 → GET  /passport/v1/user/onlineInfo             → isOnline:true
 ```
@@ -204,10 +204,10 @@ GET /passport/v1/auth/authCheck?clientType=SDPBrowserClient&platform=Mac&lang=zh
 x-csrf-token: <csrfToken>
 ```
 
-- **受信设备**(该 `device_id` 已完成过首次验证):`{"code":0, ...}`,`data.nextService` 不为 `auth/sms`,可直接进入会话换取。
-- **新设备**:`{"code":0, "data":{"nextService":"auth/sms","nextServiceList":[{"authType":"auth/sms",...}]}}`,需走短信二次验证(§3.6)。
+- **无需短信**:`{"code":0, ...}`,`data.nextService` 不为 `auth/sms`,可直接进入会话换取。
+- **需要短信**:`{"code":0, "data":{"nextService":"auth/sms","nextServiceList":[{"authType":"auth/sms",...}]}}`,继续走 §3.6。新 `device_id` 首次登录必定属于此情况;后续完整登录也可能再次触发。
 
-### 3.6 短信二次验证(仅新设备首次)
+### 3.6 短信二次验证
 
 ```
 POST /passport/v1/auth/sms?action=sendsms&clientType=…&platform=Mac&lang=zh-CN      (触发短信,请求体 {})
@@ -306,10 +306,22 @@ x-csrf-token: <csrfToken>
 }
 ```
 
-**域名→内网 IP 映射规则**(参考实现 `build_domain_map`):对同一应用 `addressList` 中的条目,
-`host` 若含 `@` 先取 `@` 之后部分;随后,`host` 为纯数字点分者记为内网 IP,为域名者记为域名;
-将该应用的域名映射到其第一个内网 IP。例如 `library.shanghaitech.edu.cn → 10.15.45.163`。
-含通配符/范围(`*`、`-`、`/`)的 `host` 不参与映射。
+`addressList` 是实际路由策略,不能只保留域名映射。解析时要同时保存以下规则:
+
+- 精确域名和同一应用的首个内网 IPv4,例如
+  `library.shanghaitech.edu.cn:443 -> 10.15.45.163`。
+- 精确 IP、CIDR 和闭区间,并保留协议、端口范围及 `appId`。
+- `*.com`、`*.cn` 等后缀通配符;其他通配符形式暂不匹配。
+
+拨号顺序为:IP 字面量直接查 IP 规则;域名先查精确映射,未命中则解析
+IPv4 并查 IP 规则,最后才用后缀通配符。IP 规则先选精确地址;CIDR 与
+区间按覆盖的地址数量比较,范围越小越优先。例如 10/8 区间应覆盖 `/0`
+兜底,而 `/16` 又比 10/8 更具体。同级规则保持 `appList` 顺序。
+
+后缀规则兜底时,authRequestIP 还要携带原始域名(见 §6.2)。网关会用
+自己的 DNS 结果核对 `destAddr`;若公网 DNS 返回了不同的 CDN 地址,
+会返回 `73600004`。因此已被 IP 规则覆盖的目标应走 IP 规则,不要附带
+`domain`。`host` 含 `@` 时只取 `@` 后半段。
 
 ### 4.3 网关线路
 
@@ -428,6 +440,15 @@ x-csrf-token: <csrfToken>
 }
 ```
 
+后缀通配符兜底时,在 `ip` 与 `procHash` 之间插入可选字段:
+
+```json
+"domain": "www.example.com"
+```
+
+精确域名映射和 IP 规则命中时必须省略该字段。只要提供 `domain`,网关
+就会核对 `destAddr` 是否属于它对该域名的解析结果。
+
 字段约定:
 
 | 字段 | 类型 | 说明 |
@@ -444,6 +465,7 @@ x-csrf-token: <csrfToken>
 | `ip.protocol` | int | `6`(TCP)/`17`(UDP)。 |
 | `ip.destAddr`/`destPort` | string/int | 目标地址/端口。 |
 | `ip.srcAddr`/`srcPort` | string/int | 源地址=VIP,源端口=本地分配。 |
+| `domain` | string,可选 | 后缀通配符兜底时的原始域名,字段位置在 `ip` 之后;IP 规则命中时省略。 |
 | `procHash` | string | `SHA256(process path).upper()`,与 `env...fingerprint` 一致。 |
 | `xRequestSig` | string | **本网关不校验,可置空字符串**(置空/随机均返回 `code:0`)。如需计算见 §10.3。 |
 
@@ -557,15 +579,15 @@ x-csrf-token: <csrfToken>
 2. 客户端发请求 `0x05 <cmd> 0x00 <atyp> <dst.addr> <dst.port>`:
    - `cmd=0x01`(CONNECT;不支持的命令回 `0x05 0x07 …`)。
    - `atyp`:`0x01`=IPv4(4 字节)、`0x03`=域名(1 字节长度+域名)、`0x04`=IPv6(16 字节);**不支持的 atyp 回 `0x05 0x08 …`**。
-3. 域名先经 §4.2 的域名→内网 IP 映射解析;映射未命中时**回退到公网 DNS**(`gethostbyname`);仍无法解析则回 `0x05 0x04 …`(host unreachable)。
+3. 按 §4.2 选择目标 IP、`appId` 和可选域名;无法解析时回 `0x05 0x04 …`(host unreachable)。
 4. 通过隧道建立 TCP 连接(§6+§8,失败重试,见 §12),成功后回 `0x05 0x00 0x00 0x01 0.0.0.0:0`。
 5. 双向中继:客户端↔隧道 TCP 端点,逐块(参考 4096 字节)转发,任一方向结束即关闭。
 
 ### 9.2 解耦
 
-- SOCKS5/HTTP 入口仅依赖一个「`open_tcp(dst_ip, dst_port) -> 双向字节流`」抽象接口,不感知 aTrust 隧道细节。
-- 隧道模块只消费「会话凭据(sid/device_id/网关)」,不感知入口协议。
-- 登录/配置模块独立产出会话凭据并持久化,供隧道模块加载复用。
+- SOCKS5/HTTP 入口只依赖「`dial(dst_ip, dst_port, app_id, domain) -> 双向字节流`」接口,不感知 aTrust 帧格式或用户态 TCP。
+- 隧道模块只消费会话凭据和解析后的目标,不感知入口协议。
+- 登录/配置模块独立产出并持久化会话凭据,供隧道和 Resolver 复用。
 
 ---
 
@@ -648,6 +670,7 @@ X-Request-Sig = LOWER_HEX( HMAC-SHA256( hex_decode(signKey), pathWithQuery + bod
 | 隧道认证 `code:0` + deviceID + VIP | 成功 | — |
 | 每连接认证 `code:0` + connectToken | 成功 | — |
 | 每连接认证 `10000001 invalid arguments` | authRequestIP 结构不符 | 按 §6.2 校正字段(尤其 deviceId 小写、完整 env、去掉 appToken/rcAppliedInfo) |
+| 每连接认证 `73600004` | `domain` 与网关解析出的目标 IP 不一致 | 改用匹配 `destAddr` 的 IP 规则,或使用与网关一致的 DNS 结果 |
 | 无 SYN-ACK(握手超时) | 网关瞬时拒绝(快速连接 churn 触发限速/conntrack 污染) | 退避重试(§12) |
 | `1001`/`1002`/`1003`/`1005`/`1006` | 隧道:选线/拨号/封装/IO 超时/VIP 解析 | 换线/重连 |
 | `10000002`~`10000004`、`99700001` | 触发线路切换 | 切换网关线路 |
@@ -656,12 +679,11 @@ X-Request-Sig = LOWER_HEX( HMAC-SHA256( hex_decode(signKey), pathWithQuery + bod
 
 ## 12. 运行与鲁棒性要点
 
-### 12.1 设备信任与免短信
+### 12.1 设备标识、会话与短信
 
-- `device_id` 持久化且永不变更。首次登录某 `device_id` 需一次短信验证;此后该 `device_id` 成为「受信设备」,
-  `authCheck` 直接通过(`code:0` 且无 `nextService=auth/sms`),**不再需要短信**。
-- IDS 侧用 passkey 免密。因此用户仅需「绑定一次 passkey + 首次登录输入一次短信」,之后全程自动。
-- 会话凭据(cookies、sid、device_id、网关线路)加密持久化(0600 权限),重启直接复用;失效才重登。
+- `device_id` 必须持久化且保持不变。新 `device_id` 首次登录需要短信验证;更换它会再次触发。
+- IDS 侧用 passkey 免密。服务端在会话彻底失效后的完整登录中仍可能再次要求短信,不能假定设备验证永久有效。
+- 会话凭据(cookies、sid、device_id、网关线路)加密持久化(0600 权限),重启时先复用;失效后再用 passkey 登录。该策略能减少短信次数,但不能保证永久免短信。
 
 ### 12.2 网关限速与连接重试
 

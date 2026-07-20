@@ -13,12 +13,12 @@ SOCKS5 / HTTP CONNECT 代理暴露给其他程序。协议规格见 [`docs/TECHN
 ```
 
 - **登录**:IDS passkey(WebAuthn)免密登录 → CAS 跳转 → reportEnv → authCheck →
-  会话换取。受信设备免短信(见下文「短信」一节)。
+  会话换取。
 - **隧道**:网关 441 端口 TLS 之上承载版本 `0x05` 的二进制帧;一次隧道认证取得
   虚拟 IP(VIP,仅用作数据包的源地址标记)。
 - **数据面**:每条 TCP 连接先做一次「每连接认证」取得 connectToken,随后在隧道内
   以用户态 TCP 端点(三次握手、seq/ack、重组)重建,封装为 IPv4 包经数据帧转发。
-- **保活**:心跳 20s + 连续无响应判死 → 指数退避重连(1s→30s);多线路探测择优,
+- **保活**:心跳 20s,连续无响应判死,随后指数退避重连(1s→30s);多线路探测择优,
   隧道层错误码触发换线;会话失效时 passkey 静默重登。
 
 ## 安装
@@ -31,7 +31,7 @@ go build -o geektrust ./cmd/geektrust
 
 ## 一次性准备:绑定 passkey
 
-geekTrust 只消费已绑定的 passkey 凭据(keystore),绑定流程需要浏览器交互,由
+geekTrust 只消费已绑定的 passkey 凭据(keystore)。绑定流程需要浏览器交互,由
 [shanghaitech-ids-passkey](https://github.com/vvbbnn00/shanghaitech-ids-passkey) 完成:
 
 ```sh
@@ -56,26 +56,26 @@ state_file = "./state.enc"            # 加密的会话凭据
 
 [inbound.socks5]
 enabled = true
-listen = "127.0.0.1:1080"
+listen = "127.0.0.1:1080"    # 代理无认证,务必只监听回环地址
 [inbound.http]
 enabled = true
-listen = "127.0.0.1:8080"
+listen = "127.0.0.1:8080"    # 同上:改成 0.0.0.0 会把你的 VPN 会话暴露给局域网
 ```
 
 ## 使用
 
 ```sh
-# 首次登录(新 device_id 需输入一次短信验证码)
+# 登录(新 device_id 首次登录需输入一次短信验证码)
 ./geektrust -config config.toml login
 
-# 启动代理(默认命令;会话自动恢复/静默重登)
+# 启动代理(默认命令;会话自动恢复,失效时静默重登)
 ./geektrust -config config.toml run
 
-# 经隧道拨号自检(443 端口会完成 TLS 握手)
+# 经隧道拨号自检(443 端口会完成 TLS 握手并打印证书主题)
 ./geektrust -config config.toml dial library.shanghaitech.edu.cn
 ```
 
-经代理访问 VPN 内资源:
+经代理访问:
 
 ```sh
 curl --socks5-hostname 127.0.0.1:1080 https://library.shanghaitech.edu.cn/
@@ -84,22 +84,37 @@ curl -x http://127.0.0.1:8080 https://library.shanghaitech.edu.cn/qbsjk/list.htm
 
 ## 短信验证
 
-短信二次验证仅在「新 device_id 首次登录」时触发,无法绕过首次验证。
-`device_id` 持久化且不应更改;会话凭据加密保存(`state.enc` + 自动生成的
-`state.enc.key`,均 0600 权限),重启直接复用、失效自动静默重登,因此
-**一台机器只需输入一次短信**。若更换 `device_id` 或删除状态文件,会再次要求短信。
+新 device_id 首次登录必定触发短信二次验证,无法绕过。之后是否需要短信由服务端
+决定:`device_id` 持久化且不应更改,会话凭据加密保存(`state.enc` + 自动生成的
+`state.enc.key`,均 0600 权限),重启直接复用,会话失效时 passkey 静默重登。
+只要会话能持续或静默恢复,就不会再要求短信。
+
+注意:实测发现当会话彻底失效、需要走完整登录流程时,服务端可能再次要求短信
+(设备信任并未稳定地记住 device_id)。因此「免短信」依赖保持会话存活,
+而不是设备绑定本身。更换 `device_id` 或删除状态文件后重新登录,也可能
+再次要求短信。
+
+## 路由与解析
+
+路由策略来自 clientResource 下发的完整应用表。规则包含精确域名、
+`*.cn`/`*.com` 等后缀通配符,以及精确 IP、CIDR 和 IP 区间。端口范围
+也参与匹配:
+
+- `library.shanghaitech.edu.cn:443` 这类精确域名走专属应用和内网地址;
+- 其他域名先由 DNS 解析,再按目标 IP 选择应用;没有 IP 规则时才尝试
+  后缀通配符;
+- IP 规则相同时优先更具体的规则。校园内外网的兜底应用覆盖大部分地址
+  和端口,但网关自身 IP、`198.18.0.0/15` 等地址仍会被网关拒绝。
+
+DNS 默认直连 `223.5.5.5` 和 `119.29.29.29`,并过滤 fake-ip 假地址;
+系统 DNS 是最后一层兜底。可用 `dns` 配置项覆盖。后缀通配符兜底会把
+域名交给网关再次解析,CDN 地址不一致时可能被拒绝。
 
 ## 限制
 
-- 仅 TCP over IPv4。SOCKS5 UDP ASSOCIATE 与 IPv6 目标暂不支持(协议规格中
-  UDP 数据帧格式未定;隧道 VIP 为 IPv4)。
-- 域名解析优先使用 clientResource 下发的应用地址表(域名 → 隧道内网 IP);
-  未命中时回退 DNS(默认直连 223.5.5.5/119.29.29.29,过滤 fake-ip 假地址,
-  系统 DNS 兜底;可用 `dns` 配置项覆盖)。
-- 网关只路由授权资源:不在授权列表内的目标(即使解析正确)会被网关地址检查
-  拒绝(错误码 10000005)。官方客户端会把这类流量直连公网,纯代理架构下则
-  表现为连接被拒。
-- 浏览器路径(clientType=SDPBrowserClient),不计算接口签名。
+- 仅 TCP over IPv4。SOCKS5 UDP ASSOCIATE 与 IPv6 目标暂不支持(UDP 数据帧
+  格式未定;隧道 VIP 为 IPv4)。
+- 控制面走浏览器路径(clientType=SDPBrowserClient),不计算接口签名。
 
 ## 鸣谢
 

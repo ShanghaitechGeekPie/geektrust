@@ -1,6 +1,6 @@
-// Package resolver maps target hostnames to tunnel-internal IPs
-// (PLAN.md §2.1): the appList domain map first, public DNS as fallback.
-// Resolution lives in the inbound layer so Dialer keeps "IPs only" semantics.
+// Package resolver maps target hosts to tunnel IPs and authorization data.
+// It prefers exact domain mappings and DNS-resolved IP policy, then falls
+// back to domain wildcards when no IP rule applies.
 package resolver
 
 import (
@@ -24,7 +24,7 @@ var ErrUnresolvable = errors.New("host not resolvable")
 // stage for environments with working local DNS.
 var DefaultPublicDNS = []string{"223.5.5.5", "119.29.29.29"}
 
-// Resolver resolves targets against the live credential's domain map.
+// Resolver resolves targets against the live credential's routing policy.
 type Resolver struct {
 	provider session.CredentialProvider
 	stages   []*net.Resolver // tried in order: explicit/public servers, then system
@@ -52,31 +52,57 @@ func New(provider session.CredentialProvider, dnsServers []string) *Resolver {
 	return &Resolver{provider: provider, stages: []*net.Resolver{custom, net.DefaultResolver}}
 }
 
-// Resolve returns the tunnel-internal IP to dial for host plus the appId
-// authorizing it. IP literals pass through; unmapped domains fall back to
-// DNS (the answer routes through the tunnel like any other IP).
-func (r *Resolver) Resolve(ctx context.Context, host string) (ip string, appID string, err error) {
+// Resolution is a resolved dial target.
+type Resolution struct {
+	IP    string
+	AppID string
+	// Domain carries the original hostname when the target is authorized
+	// via a wildcard (suffix) rule: the gateway matches "*.com"-style
+	// entries against the auth request's domain field, not the resolved IP.
+	// Empty for IP-authorized targets.
+	Domain string
+}
+
+// Resolve returns the tunnel target for host:port. Order: IP literal →
+// exact domain rule → DNS + IP-policy match → TLD suffix fallback.
+//
+// The IP-policy match carries no domain: the gateway checks the destAddr
+// against the app's address ranges. The suffix fallback does carry the
+// domain: wildcard ("*.com") entries are matched against the auth
+// request's domain field, and the gateway cross-checks the destAddr
+// against its own resolution of that domain.
+func (r *Resolver) Resolve(ctx context.Context, host string, port int) (Resolution, error) {
 	cred, err := r.provider.Credential(ctx)
 	if err != nil {
-		return "", "", err
+		return Resolution{}, err
 	}
 
 	if parsed := net.ParseIP(host); parsed != nil {
 		v4 := parsed.To4()
 		if v4 == nil {
-			return "", "", fmt.Errorf("%w: %s: IPv6 targets are not supported", ErrUnresolvable, host)
+			return Resolution{}, fmt.Errorf("%w: %s: IPv6 targets are not supported", ErrUnresolvable, host)
 		}
-		return v4.String(), appForIP(cred, v4.String()), nil
+		return Resolution{IP: v4.String(), AppID: cred.Policy.AppIDFor(v4, port, cred.AppID)}, nil
 	}
-	if ep, ok := cred.DomainMap[host]; ok {
-		return ep.IP, ep.AppID, nil
+	if rule, ok := cred.Policy.MatchDomain(host, port); ok {
+		return Resolution{IP: rule.IP, AppID: rule.AppID}, nil
 	}
 
 	v4, err := r.lookupIPv4(ctx, host)
 	if err != nil {
-		return "", "", fmt.Errorf("%w: %s: %v", ErrUnresolvable, host, err)
+		return Resolution{}, fmt.Errorf("%w: %s: %v", ErrUnresolvable, host, err)
 	}
-	return v4.String(), appForIP(cred, v4.String()), nil
+	return routeDNSResult(cred, host, port, v4), nil
+}
+
+func routeDNSResult(cred *session.Credential, host string, port int, v4 net.IP) Resolution {
+	if rule, ok := cred.Policy.MatchIP(v4, port); ok {
+		return Resolution{IP: v4.String(), AppID: rule.AppID}
+	}
+	if rule, ok := cred.Policy.MatchSuffix(host, port); ok {
+		return Resolution{IP: v4.String(), AppID: rule.AppID, Domain: host}
+	}
+	return Resolution{IP: v4.String(), AppID: cred.AppID}
 }
 
 // lookupIPv4 tries each resolver stage in order and returns the first usable
@@ -107,11 +133,4 @@ var errNoIPv4Answer = errors.New("no usable IPv4 answer")
 func IsFakeIP(ip net.IP) bool {
 	v4 := ip.To4()
 	return v4 != nil && v4[0] == 198 && (v4[1] == 18 || v4[1] == 19)
-}
-
-func appForIP(cred *session.Credential, ip string) string {
-	if id, ok := cred.IPApps[ip]; ok && id != "" {
-		return id
-	}
-	return cred.AppID
 }

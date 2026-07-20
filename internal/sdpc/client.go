@@ -1,6 +1,6 @@
 // Package sdpc implements the aTrust SDP controller (SDPC) control plane:
 // authConfig, CAS login chain, reportEnv, authCheck, SMS second factor,
-// session exchange, onlineInfo and clientResource (TECHNICAL.md §3–§4).
+// session exchange, onlineInfo and clientResource.
 //
 // It uses the browser path (clientType=SDPBrowserClient), which requires no
 // request signing (X-Request-Sig).
@@ -22,11 +22,11 @@ const ClientTypeBrowser = "SDPBrowserClient"
 // DefaultLang is the language parameter for every control-plane call.
 const DefaultLang = "zh-CN"
 
-// UserAgent mimics a desktop browser, matching the reference implementation.
+// UserAgent mimics a desktop browser.
 const UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
 	"AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0"
 
-// Control-plane error codes (TECHNICAL.md §11.1).
+// Control-plane error codes.
 const (
 	CodeOK             = 0
 	CodeAlreadyLogged  = 10000000 // user has been logged in
@@ -38,6 +38,7 @@ const (
 	CodeAlreadyOnline  = 75500006
 	CodeTicketExpired  = 75500304
 	CodeOpAbnormal     = 75599999 // reportEnv 前置未完成
+	CodeSMSStillValid  = 75500401 // 验证码仍在有效期内(sendsms 重试)
 )
 
 // APIError is a non-zero controller response code.
@@ -169,16 +170,26 @@ func (c *Client) doJSON(ctx context.Context, method, path string, query url.Valu
 		return fmt.Errorf("sdpc %s: HTTP %d: %s", path, resp.StatusCode, truncate(raw, 256))
 	}
 
+	return parseEnvelopeInto(raw, path, out)
+}
+
+// parseEnvelope checks the standard response wrapper and decodes data into
+// out (if set).
+func parseEnvelope(raw []byte, out any) error {
+	return parseEnvelopeInto(raw, "(response)", out)
+}
+
+func parseEnvelopeInto(raw []byte, op string, out any) error {
 	var env envelope
 	if err := json.Unmarshal(raw, &env); err != nil {
-		return fmt.Errorf("sdpc %s: decode envelope: %w (body %s)", path, err, truncate(raw, 256))
+		return fmt.Errorf("sdpc %s: decode envelope: %w (body %s)", op, err, truncate(raw, 256))
 	}
 	if env.Code != CodeOK {
-		return &APIError{Op: path, Code: env.Code, Message: env.Message}
+		return &APIError{Op: op, Code: env.Code, Message: env.Message}
 	}
 	if out != nil && len(env.Data) > 0 && string(env.Data) != "null" {
 		if err := json.Unmarshal(env.Data, out); err != nil {
-			return fmt.Errorf("sdpc %s: decode data: %w", path, err)
+			return fmt.Errorf("sdpc %s: decode data: %w", op, err)
 		}
 	}
 	return nil

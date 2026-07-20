@@ -10,25 +10,28 @@ import (
 )
 
 // procPath is the process path impersonated in the trust environment. Its
-// SHA-256 (uppercase hex) must appear as both env fingerprint and procHash
-// (TECHNICAL.md §6.2).
+// SHA-256 (uppercase hex) must appear as both env fingerprint and procHash.
 const procPath = "/Applications/aTrust.app/Contents/Resources/bin/aTrustXtunnel"
 
-// authRequestIP field order is protocol-significant: the reference serializes
-// an OrderedDict in exactly this order (TECHNICAL.md §6.2). Go marshals
-// struct fields in declaration order. Do NOT add appToken/rcAppliedInfo.
+// authRequestIP field order is protocol-significant: the gateway expects
+// exactly this order. Go marshals struct fields in declaration order.
+// Do NOT add appToken/rcAppliedInfo.
 type authRequestIP struct {
 	Sid           string   `json:"sid"`
 	AppID         string   `json:"appId"`
 	URL           string   `json:"url"`
-	DeviceID      string   `json:"deviceId"` // key is lowercase deviceId
+	DeviceID      string   `json:"deviceId"`
 	ConnectionID  string   `json:"connectionId"`
 	Env           trustEnv `json:"env"`
 	ConntrackHash uint64   `json:"conntrackHash"`
 	Lang          string   `json:"lang"`
 	IP            authIP   `json:"ip"`
-	ProcHash      string   `json:"procHash"`
-	XRequestSig   string   `json:"xRequestSig"` // gateway does not verify; empty
+	// Domain authorizes wildcard ("*.com") app entries: the gateway matches
+	// them against this field, not the resolved destAddr. Omitted for
+	// IP-authorized targets.
+	Domain      string `json:"domain,omitempty"`
+	ProcHash    string `json:"procHash"`
+	XRequestSig string `json:"xRequestSig"`
 }
 
 type authIP struct {
@@ -62,9 +65,9 @@ type trustEnv struct {
 // env.application.runtime.process.fingerprint and procHash.
 var procFingerprint = fmt.Sprintf("%X", sha256.Sum256([]byte(procPath)))
 
-// buildAuthRequestIP serializes the per-connection auth body exactly per
-// TECHNICAL.md §6.2.
-func buildAuthRequestIP(sid, appID, deviceID, dstIP string, dstPort int, vip net.IP, srcPort uint16, conntrackHash uint64) ([]byte, error) {
+// buildAuthRequestIP serializes the per-connection auth body. domain is the
+// original hostname for wildcard-authorized targets (empty otherwise).
+func buildAuthRequestIP(sid, appID, deviceID, dstIP string, dstPort int, vip net.IP, srcPort uint16, conntrackHash uint64, domain string) ([]byte, error) {
 	// connectionId = MD5(device_id).upper() + "-" + unix microseconds.
 	connID := fmt.Sprintf("%X-%d", md5.Sum([]byte(deviceID)), time.Now().UnixMicro())
 
@@ -97,6 +100,7 @@ func buildAuthRequestIP(sid, appID, deviceID, dstIP string, dstPort int, vip net
 			SrcAddr:  vip.String(),
 			SrcPort:  int(srcPort),
 		},
+		Domain:      domain,
 		ProcHash:    procFingerprint,
 		XRequestSig: "",
 	}

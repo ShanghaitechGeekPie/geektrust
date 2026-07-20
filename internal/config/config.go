@@ -11,7 +11,8 @@ import (
 )
 
 // DefaultDeviceID is MD5("atrust-headless-client-v1").upper(). It must stay
-// stable per installation: the server remembers trusted devices by device_id.
+// stable per installation because changing it makes the controller treat the
+// client as a new device.
 const DefaultDeviceID = "84B5B45FE73EC0036C3E97717308447F"
 
 // DefaultAppID is the "电子资源" (library) application.
@@ -99,10 +100,13 @@ func (c *Config) validate() error {
 	if c.Platform != "Mac" {
 		return fmt.Errorf("platform must be exactly \"Mac\" (case sensitive), got %q", c.Platform)
 	}
-	for _, gw := range c.Gateways {
-		if _, _, err := SplitHostPort(gw); err != nil {
+	for i, gw := range c.Gateways {
+		host, port, err := SplitHostPort(gw)
+		if err != nil {
 			return fmt.Errorf("gateway %q: %w", gw, err)
 		}
+		// Normalize so downstream dialers always get host:port.
+		c.Gateways[i] = net.JoinHostPort(host, port)
 	}
 	for _, d := range c.DNS {
 		if net.ParseIP(d) == nil {

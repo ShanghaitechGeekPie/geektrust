@@ -3,6 +3,9 @@ package resolver
 import (
 	"net"
 	"testing"
+
+	"geektrust/internal/sdpc"
+	"geektrust/internal/session"
 )
 
 func TestIsFakeIP(t *testing.T) {
@@ -35,5 +38,41 @@ func TestNewStages(t *testing.T) {
 	r = New(nil, []string{"1.2.3.4"})
 	if len(r.stages) != 2 {
 		t.Fatalf("stages = %d, want 2", len(r.stages))
+	}
+}
+
+func TestRouteDNSResultPrefersIPPolicy(t *testing.T) {
+	ip := net.ParseIP("180.101.49.44")
+	policy := &sdpc.Resource{
+		IPRules: []sdpc.IPRule{{
+			Net:   &net.IPNet{IP: net.IPv4(128, 0, 0, 0), Mask: net.CIDRMask(1, 32)},
+			AppID: "ip-app",
+			Port:  sdpc.PortRange{Min: 1, Max: 65535},
+			Proto: "all",
+		}},
+		SuffixRules: []sdpc.SuffixRule{{
+			Suffix: ".com",
+			AppID:  "suffix-app",
+			Port:   sdpc.PortRange{Min: 1, Max: 65535},
+			Proto:  "all",
+		}},
+	}
+	cred := &session.Credential{Policy: policy, AppID: "fallback-app"}
+
+	got := routeDNSResult(cred, "www.baidu.com", 443, ip)
+	if got.IP != "180.101.49.44" || got.AppID != "ip-app" || got.Domain != "" {
+		t.Fatalf("IP-authorized resolution = %+v", got)
+	}
+
+	policy.IPRules = nil
+	got = routeDNSResult(cred, "www.baidu.com", 443, ip)
+	if got.AppID != "suffix-app" || got.Domain != "www.baidu.com" {
+		t.Fatalf("suffix fallback resolution = %+v", got)
+	}
+
+	policy.SuffixRules = nil
+	got = routeDNSResult(cred, "www.baidu.com", 443, ip)
+	if got.AppID != "fallback-app" || got.Domain != "" {
+		t.Fatalf("default resolution = %+v", got)
 	}
 }

@@ -8,7 +8,7 @@ import (
 	"net/url"
 )
 
-// CasTicket runs the CAS redirect chain (TECHNICAL.md §3.3):
+// CasTicket runs the CAS redirect chain:
 //
 //	GET /passport/v1/public/casLogin?sfDomain=Shanghaitech.edu.cn
 //	  302 → IDS (session/CASTGC from the passkey login is sent by the jar)
@@ -18,7 +18,7 @@ import (
 // and returns the casTicket needed by reportEnv.
 func (c *Client) CasTicket(ctx context.Context) (string, error) {
 	// casLogin is a /passport/v1 endpoint: the shared query parameters are
-	// mandatory (TECHNICAL.md §2.3), and the csrf header exists by now.
+	// mandatory, and the csrf header exists by now.
 	q := url.Values{}
 	q.Set("sfDomain", "Shanghaitech.edu.cn")
 	q.Set("clientType", ClientTypeBrowser)
@@ -86,9 +86,9 @@ func (c *Client) CasTicket(ctx context.Context) (string, error) {
 	return data.Ticket, nil
 }
 
-// ReportEnv posts the environment report (TECHNICAL.md §3.4). Skipping it
-// makes authCheck fail with 75599999. Must run before the session exists;
-// CodeAlreadyLogged means a session is already up, which is fine.
+// ReportEnv posts the environment report. Skipping it makes authCheck fail
+// with 75599999. Must run before the session exists; CodeAlreadyLogged means
+// a session is already up, which is fine.
 func (c *Client) ReportEnv(ctx context.Context, casTicket string, ac *AuthConfig) error {
 	body := map[string]any{
 		"ticket": casTicket,
@@ -113,9 +113,9 @@ func (c *Client) ReportEnv(ctx context.Context, casTicket string, ac *AuthConfig
 	return err
 }
 
-// AuthCheck reports whether the device still needs SMS second factor
-// (TECHNICAL.md §3.5). Trusted devices pass directly. nextService is the
-// server's selected route; the list is only consulted when it is absent.
+// AuthCheck reports whether the controller requires SMS second factor.
+// nextService is the server-selected route; the list is consulted only
+// when nextService is absent.
 func (c *Client) AuthCheck(ctx context.Context) (needSMS bool, err error) {
 	var data struct {
 		NextService     string `json:"nextService"`
@@ -137,7 +137,7 @@ func (c *Client) AuthCheck(ctx context.Context) (needSMS bool, err error) {
 	return false, nil
 }
 
-// SendSMS triggers the verification text (TECHNICAL.md §3.6).
+// SendSMS triggers the verification text.
 func (c *Client) SendSMS(ctx context.Context) error {
 	q := url.Values{"action": {"sendsms"}}
 	return c.doJSON(ctx, "POST", "/passport/v1/auth/sms", q, map[string]any{}, nil)
@@ -161,7 +161,7 @@ func (c *Client) CheckSMSCode(ctx context.Context, code string) (string, error) 
 }
 
 // TicketExchange converts the logged-in state into a sidTicket
-// (TECHNICAL.md §3.7, trusted-device path).
+// (trusted-device path).
 func (c *Client) TicketExchange(ctx context.Context) (string, error) {
 	var data struct {
 		SidTicket string `json:"sidTicket"`
@@ -175,14 +175,14 @@ func (c *Client) TicketExchange(ctx context.Context) (string, error) {
 	return data.SidTicket, nil
 }
 
-// SessionIDExchange establishes the sid session from a sidTicket
-// (TECHNICAL.md §3.7). The sid cookie lands in the jar.
+// SessionIDExchange establishes the sid session from a sidTicket. The sid
+// cookie lands in the jar.
 func (c *Client) SessionIDExchange(ctx context.Context, sidTicket string) error {
 	return c.doJSON(ctx, "POST", "/passport/v1/public/sessionIdExchange", url.Values{},
 		map[string]string{"sidTicket": sidTicket}, nil)
 }
 
-// OnlineInfo is the session liveness probe (TECHNICAL.md §3.8).
+// OnlineInfo is the session liveness probe.
 type OnlineInfo struct {
 	IsOnline    bool   `json:"isOnline"`
 	Username    string `json:"username"`

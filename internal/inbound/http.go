@@ -21,8 +21,8 @@ type bufferedConn struct {
 // Read resolves the ambiguous promotion between bufio.Reader and net.Conn.
 func (b *bufferedConn) Read(p []byte) (int, error) { return b.Reader.Read(p) }
 
-// handleHTTPConnect serves one HTTP CONNECT client (PLAN.md §7). Plain HTTP
-// forwarding is out of scope: this is a tunneling proxy.
+// handleHTTPConnect serves one HTTP CONNECT client. Plain HTTP forwarding is
+// out of scope: this is a tunneling proxy.
 func (s *Server) handleHTTPConnect(ctx context.Context, client net.Conn) {
 	br := bufio.NewReader(client)
 	req, err := http.ReadRequest(br)
@@ -47,13 +47,17 @@ func (s *Server) handleHTTPConnect(ctx context.Context, client net.Conn) {
 
 	s.logger.Info("http CONNECT", "host", host, "port", port)
 
-	ip, _, err := s.resolver.Resolve(ctx, host)
+	// Resolve and dial under a bounded context so a disconnected client or
+	// an unavailable gateway cannot hold the handler slot indefinitely.
+	setupCtx, cancel := context.WithTimeout(ctx, handshakeLimit)
+	defer cancel()
+	target, err := s.resolver.Resolve(setupCtx, host, port)
 	if err != nil {
 		s.logger.Warn("http resolve failed", "host", host, "err", err)
 		writeHTTPStatus(client, http.StatusBadGateway, "host not resolvable")
 		return
 	}
-	upstream, err := s.dialer.Dial(ctx, ip, port)
+	upstream, err := s.dialer.Dial(setupCtx, target.IP, port, target.AppID, target.Domain)
 	if err != nil {
 		s.logger.Warn("http dial failed", "host", host, "err", err)
 		writeHTTPStatus(client, http.StatusBadGateway, "tunnel dial failed")

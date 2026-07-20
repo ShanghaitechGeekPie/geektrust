@@ -29,8 +29,8 @@ const (
 	socksReplyAtypUnsupported = 0x08
 )
 
-// handleSOCKS5 serves one SOCKS5 client: no-auth greeting, CONNECT only
-// (TECHNICAL.md §9.1). UDP ASSOCIATE is intentionally unsupported (PLAN §7).
+// handleSOCKS5 serves one SOCKS5 client: no-auth greeting, CONNECT only.
+// UDP ASSOCIATE is intentionally unsupported.
 func (s *Server) handleSOCKS5(ctx context.Context, client net.Conn) {
 	// Greeting: VER NMETHODS METHODS → VER METHOD. Select no-auth (0x00)
 	// only if the client offers it; otherwise 0xFF (RFC 1928).
@@ -106,7 +106,11 @@ func (s *Server) handleSOCKS5(ctx context.Context, client net.Conn) {
 
 	s.logger.Info("socks5 CONNECT", "host", host, "port", port)
 
-	ip, _, err := s.resolver.Resolve(ctx, host)
+	// Resolve and dial under a bounded context so a disconnected client or
+	// an unavailable gateway cannot hold the handler slot indefinitely.
+	setupCtx, cancel := context.WithTimeout(ctx, handshakeLimit)
+	defer cancel()
+	target, err := s.resolver.Resolve(setupCtx, host, port)
 	if err != nil {
 		s.logger.Warn("socks5 resolve failed", "host", host, "err", err)
 		if errors.Is(err, resolver.ErrUnresolvable) {
@@ -117,14 +121,14 @@ func (s *Server) handleSOCKS5(ctx context.Context, client net.Conn) {
 		return
 	}
 
-	upstream, err := s.dialer.Dial(ctx, ip, port)
+	upstream, err := s.dialer.Dial(setupCtx, target.IP, port, target.AppID, target.Domain)
 	if err != nil {
-		s.logger.Warn("socks5 dial failed", "target", net.JoinHostPort(ip, strconv.Itoa(port)), "err", err)
+		s.logger.Warn("socks5 dial failed", "target", net.JoinHostPort(target.IP, strconv.Itoa(port)), "err", err)
 		reply(socksReplyRefused)
 		return
 	}
 	reply(socksReplySuccess)
-	s.logger.Debug("socks5 relaying", "target", net.JoinHostPort(ip, strconv.Itoa(port)))
+	s.logger.Debug("socks5 relaying", "target", net.JoinHostPort(target.IP, strconv.Itoa(port)))
 	client.SetDeadline(time.Time{})
 	relayPair(client, upstream)
 }

@@ -13,18 +13,19 @@ import (
 
 // fakeTunnel is a tunnelLink double capturing uplink segments for assertions.
 type fakeTunnel struct {
-	mu      sync.Mutex
-	sent    [][]byte
-	dead    chan struct{}
-	unreg   []uint16
-	sendErr error
+	mu        sync.Mutex
+	sent      [][]byte
+	deadlines []time.Time
+	dead      chan struct{}
+	unreg     []uint16
+	sendErr   error
 }
 
 func newFakeTunnel() *fakeTunnel {
 	return &fakeTunnel{dead: make(chan struct{})}
 }
 
-func (f *fakeTunnel) SendData(token string, pkt []byte) error {
+func (f *fakeTunnel) SendData(token string, pkt []byte, deadline time.Time) error {
 	select {
 	case <-f.dead:
 		return errors.New("tunnel dead") // real tunnel returns ErrTunnelDead
@@ -38,6 +39,7 @@ func (f *fakeTunnel) SendData(token string, pkt []byte) error {
 	cp := make([]byte, len(pkt))
 	copy(cp, pkt)
 	f.sent = append(f.sent, cp)
+	f.deadlines = append(f.deadlines, deadline)
 	return nil
 }
 
@@ -68,6 +70,12 @@ func (f *fakeTunnel) sentCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return len(f.sent)
+}
+
+func (f *fakeTunnel) lastDeadline() time.Time {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.deadlines[len(f.deadlines)-1]
 }
 
 var (
@@ -273,6 +281,44 @@ func TestWriteSegmentation(t *testing.T) {
 	info := ft.lastSegment(t)
 	if info.flags != flagPSH|flagACK || len(info.payload) != 200 {
 		t.Errorf("last segment flags=0x%02x len=%d", info.flags, len(info.payload))
+	}
+}
+
+func TestWriteDeadlineDoesNotBlockTCPControl(t *testing.T) {
+	ft := newFakeTunnel()
+	conn := establish(t, ft, 1000)
+
+	if err := conn.SetWriteDeadline(time.Now().Add(-time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.Write([]byte("expired")); !errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Fatalf("Write err = %v, want deadline exceeded", err)
+	}
+
+	before := ft.sentCount()
+	conn.DeliverPacket(serverPacket(1000, 0, flagACK|flagPSH, []byte("x")))
+	deadline := time.Now().Add(time.Second)
+	for ft.sentCount() == before && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if ft.sentCount() == before {
+		t.Fatal("receive ACK was not sent")
+	}
+	if got := ft.lastSegment(t).flags; got != flagACK {
+		t.Fatalf("receive ACK flags = 0x%02x", got)
+	}
+	if got := ft.lastDeadline(); !got.IsZero() {
+		t.Fatalf("receive ACK inherited application deadline %v", got)
+	}
+
+	if err := conn.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got := ft.lastSegment(t).flags; got != flagFIN|flagACK {
+		t.Fatalf("close flags = 0x%02x", got)
+	}
+	if got := ft.lastDeadline(); !got.IsZero() {
+		t.Fatalf("FIN inherited application deadline %v", got)
 	}
 }
 

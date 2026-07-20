@@ -5,16 +5,16 @@
 # passkey 凭据文件(由 shanghaitech-ids-passkey 的 bind 命令生成)。
 keystore = "./ids-passkey.keystore"
 
-# 持久化设备标识(32 位大写十六进制)。首次登录需一次短信验证,此后成为受信设备;
-# 一经使用请勿更改,否则服务器视为新设备、再次要求短信验证。
-# 默认值 = MD5("atrust-headless-client-v1").upper()。
+# 持久化设备标识(32 位大写十六进制)。新设备首次登录需要短信验证;
+# 后续完整登录也可能由服务端再次要求短信。一经使用请勿更改,否则服务器
+# 会视为新设备。默认值 = MD5("atrust-headless-client-v1").upper()。
 device_id = "84B5B45FE73EC0036C3E97717308447F"
 
 # ---- 控制器 ----
 base_url = "https://vpn.shanghaitech.edu.cn"
 platform = "Mac"            # 大小写敏感,必须为 Mac
 
-# 默认每连接认证使用的 appId(电子资源)。域名命中 appList 时优先使用应用自身的 appId。
+# clientResource 没有匹配的精确域名、IP 或后缀规则时使用的兜底 appId。
 app_id = "681165d0-1c77-11ed-8650-cd35a51aa42a"
 
 # ---- 网关线路 ----
@@ -35,6 +35,8 @@ dns = []
 state_file = "./state.enc"
 
 # ---- 代理入口 ----
+# 注意:两个代理都没有认证。务必只监听回环地址(127.0.0.1);监听其他地址
+# 会把你的 VPN 会话开放给同网段的任何人。
 [inbound.socks5]
 enabled = true
 listen = "127.0.0.1:1080"

@@ -5,7 +5,7 @@ import (
 	"net/url"
 )
 
-// AuthConfig carries the fields later steps need (TECHNICAL.md §3.2).
+// AuthConfig carries the fields later login steps need.
 type AuthConfig struct {
 	CsrfToken       string
 	Guid            string
@@ -42,12 +42,13 @@ func (c *Client) AuthConfig(ctx context.Context) (*AuthConfig, error) {
 	if exp == "" {
 		exp = "10001"
 	}
-	return &AuthConfig{
+	ac := &AuthConfig{
 		CsrfToken:       data.Security.CsrfToken,
 		Guid:            data.Guid,
 		DevicePubKeyMod: data.AntiMITMAttackData.DevicePubKeyMod,
 		DevicePubKeyExp: exp,
 		Challenge:       data.AntiMITMAttackData.Challenge,
 		RsaCert:         data.AntiMITMAttackData.RsaCert,
-	}, nil
+	}
+	return ac, nil
 }

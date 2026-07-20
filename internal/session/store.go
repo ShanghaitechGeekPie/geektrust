@@ -1,6 +1,6 @@
 // Package session persists VPN session credentials and provides them to the
 // tunnel on demand (CredentialProvider), re-logging in silently when they
-// expire (TECHNICAL.md §12.1, PLAN.md §2.1/§4.2).
+// expire.
 package session
 
 import (
@@ -16,7 +16,7 @@ import (
 	"time"
 )
 
-// State is the persisted session (PLAN.md §8: state_file, encrypted, 0600).
+// State is the persisted session (encrypted, 0600).
 type State struct {
 	SID       string         `json:"sid"`
 	DeviceID  string         `json:"device_id"`
@@ -35,7 +35,7 @@ type CookieRecord struct {
 // Store encrypts State with AES-256-GCM under a random key kept in a sibling
 // 0600 key file (<state_file>.key). The key is generated on first save; both
 // files together protect credentials at rest while staying fully automatic
-// (no passphrase to type, per PLAN.md goal 4).
+// (no passphrase to type).
 type Store struct {
 	path string
 }

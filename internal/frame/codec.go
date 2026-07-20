@@ -1,7 +1,7 @@
 // Package frame implements the aTrust tunnel wire format: version 0x05
 // frames, the one-shot tunnel authentication exchange, per-connection auth
 // frames, heartbeat, and the two downlink data-frame layouts with IP-packet
-// splitting (TECHNICAL.md §5.2–§5.3, §6, §7).
+// splitting.
 package frame
 
 import (
@@ -38,7 +38,7 @@ const (
 type Frame struct {
 	Cmd byte
 	// Status is the 1-byte status field of 0x93/0x96 responses (observed
-	// value 0x82; the reference reads but does not validate it).
+	// value 0x82; not validated).
 	Status byte
 	// Payload carries JSON for auth responses and raw bytes elsewhere.
 	Payload []byte
@@ -64,7 +64,7 @@ func NewReaderBuf(r *bufio.Reader) *Reader {
 }
 
 // ReadFrame decodes the next frame. Data frames (0x94) are returned with
-// Packets already split by IP total-length (TECHNICAL.md §7.2).
+// Packets already split by IP total-length.
 func (fr *Reader) ReadFrame() (Frame, error) {
 	header, err := fr.read(2)
 	if err != nil {
@@ -188,14 +188,17 @@ func (fr *Reader) read(n int) ([]byte, error) {
 // --- encoding ---
 
 // EncodeTunnelAuth builds the one-shot three-segment tunnel authentication
-// write (TECHNICAL.md §5.3): method 0xD0, S-frame {"sid":…}, VIP request.
-// The JSON key must be lowercase "sid".
+// write: method 0xD0, S-frame {"sid":…}, VIP request. The JSON key must be
+// lowercase "sid".
 func EncodeTunnelAuth(sid string) ([]byte, error) {
 	body, err := json.Marshal(struct {
 		Sid string `json:"sid"`
 	}{Sid: sid})
 	if err != nil {
 		return nil, err
+	}
+	if len(body) > 65535 {
+		return nil, fmt.Errorf("frame: tunnel auth body length %d exceeds 65535", len(body))
 	}
 	out := make([]byte, 0, 3+4+len(body)+10)
 	out = append(out, Version, CmdMethodAuth, CmdMethodAccept)
@@ -207,11 +210,14 @@ func EncodeTunnelAuth(sid string) ([]byte, error) {
 }
 
 // EncodeAuthRequest wraps an authRequestIP JSON body in a 0x13 frame.
-func EncodeAuthRequest(body []byte) []byte {
+func EncodeAuthRequest(body []byte) ([]byte, error) {
+	if len(body) > 65535 {
+		return nil, fmt.Errorf("frame: auth body length %d exceeds 65535", len(body))
+	}
 	out := make([]byte, 0, 4+len(body))
 	out = append(out, Version, CmdAuthRequest)
 	out = binary.BigEndian.AppendUint16(out, uint16(len(body)))
-	return append(out, body...)
+	return append(out, body...), nil
 }
 
 // EncodeData builds an uplink 0x14 data frame carrying one or more full IPv4
@@ -258,8 +264,7 @@ type TunnelAuthReply struct {
 }
 
 // TunnelAuthError is a non-zero tunnel authentication code. Codes
-// 10000002–10000004 and 99700001 indicate the gateway line should be
-// switched (TECHNICAL.md §11.2).
+// 10000002–10000004 and 99700001 mean the gateway line should be switched.
 type TunnelAuthError struct {
 	Code    int64
 	Message string
@@ -350,8 +355,8 @@ func vipAddrLen(addrType byte) (int, error) {
 }
 
 // SplitIPPackets splits a buffer of concatenated IPv4 packets using each
-// header's total-length field (TECHNICAL.md §7.2, reference _split_ip_packets).
-// Treating a concatenated blob as one packet corrupts the TCP stream.
+// header's total-length field. Treating a concatenated blob as one packet
+// corrupts the TCP stream.
 func SplitIPPackets(data []byte) [][]byte {
 	var out [][]byte
 	i, n := 0, len(data)
@@ -361,7 +366,7 @@ func SplitIPPackets(data []byte) [][]byte {
 		}
 		total := int(binary.BigEndian.Uint16(data[i+2 : i+4]))
 		if total < 20 || i+total > n {
-			// Malformed or truncated: take the rest, as the reference does.
+			// Malformed or truncated: take the rest.
 			out = append(out, data[i:])
 			break
 		}

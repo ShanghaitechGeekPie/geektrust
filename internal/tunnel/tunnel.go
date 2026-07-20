@@ -1,7 +1,6 @@
 // Package tunnel manages the TLS tunnel to the aTrust gateway: connection,
 // one-shot tunnel authentication (VIP), heartbeat with active liveness
-// detection, frame dispatch, and reconnection with line switching
-// (TECHNICAL.md §5, §12; PLAN.md §5.1, §6).
+// detection, frame dispatch, and reconnection with line switching.
 package tunnel
 
 import (
@@ -14,6 +13,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -22,22 +22,20 @@ import (
 )
 
 const (
-	// HeartbeatInterval is the 0x15 send period (reference: 20s).
+	// HeartbeatInterval is the 0x15 send period.
 	HeartbeatInterval = 20 * time.Second
 	// livenessLimit: no received frame for this long declares the tunnel
-	// dead (PLAN.md §5.1: active "N consecutive misses" keepalive; 3× the
-	// heartbeat interval).
+	// dead (active keepalive: three missed heartbeat intervals).
 	livenessLimit = 3 * HeartbeatInterval
 	// watchInterval is how often the keepalive goroutine checks liveness.
 	watchInterval = 10 * time.Second
-	// authTimeout bounds a per-connection auth round trip (reference: 8s).
+	// authTimeout bounds a per-connection auth round trip.
 	authTimeout = 8 * time.Second
 	// connectTimeout covers TCP+TLS+tunnel auth.
 	connectTimeout = 15 * time.Second
 
-	// firstSrcPort matches the reference client, which pre-increments from
-	// 30000 (first allocation 30001). The gateway's address check rejects
-	// 30000 with code 10000005.
+	// firstSrcPort: the first allocated port is 30001. The gateway's
+	// address check rejects port 30000 with code 10000005.
 	firstSrcPort = 30001
 	lastSrcPort  = 65535
 )
@@ -59,7 +57,7 @@ type AuthResponse struct {
 }
 
 // ShouldSwitchLine reports tunnel-layer codes that mean "change gateway
-// line" (TECHNICAL.md §11.2 — a different namespace from control-plane codes).
+// line" (a separate namespace from the control-plane HTTP codes).
 func (r *AuthResponse) ShouldSwitchLine() bool {
 	switch r.Code {
 	case 10000002, 10000003, 10000004, 99700001:
@@ -75,13 +73,14 @@ type authResult struct {
 
 // Tunnel is one live TLS tunnel connection multiplexing many connections.
 type Tunnel struct {
-	conn     net.Conn
-	reader   *frame.Reader
-	writeMu  sync.Mutex
-	vip      net.IP
-	deviceID string
-	logger   *slog.Logger
-	addr     string
+	conn      net.Conn
+	reader    *frame.Reader
+	writeGate chan struct{}
+	vip       net.IP
+	deviceID  string
+	sid       string // session id this tunnel authenticated with
+	logger    *slog.Logger
+	addr      string
 
 	authCounter atomic.Uint64
 	portMu      sync.Mutex
@@ -109,9 +108,9 @@ func Dial(ctx context.Context, addr, sid string, logger *slog.Logger) (*Tunnel, 
 		return nil, fmt.Errorf("tunnel dial %s: %w", addr, err)
 	}
 
-	// The gateway accepts plain TLS without SPA (TECHNICAL.md §5.1). Its
-	// certificate is issued for the portal hostname while we dial pool IPs,
-	// so verification is disabled like every known client does.
+	// The gateway accepts plain TLS without SPA. Its certificate is issued
+	// for the portal hostname while we dial pool IPs, so verification is
+	// disabled like every known client does.
 	tlsCfg := &tls.Config{InsecureSkipVerify: true}
 	if host, _, err := net.SplitHostPort(addr); err == nil && net.ParseIP(host) == nil {
 		tlsCfg.ServerName = host
@@ -157,16 +156,18 @@ func Dial(ctx context.Context, addr, sid string, logger *slog.Logger) (*Tunnel, 
 	_ = conn.SetDeadline(time.Time{})
 
 	t := &Tunnel{
-		conn:     conn,
-		reader:   frame.NewReaderBuf(br),
-		vip:      reply.VIP,
-		deviceID: reply.DeviceID,
-		logger:   logger,
-		addr:     addr,
-		conns:    make(map[uint16]PacketSink),
-		pending:  make(map[uint64]chan authResult),
-		dead:     make(chan struct{}),
-		portNext: firstSrcPort,
+		conn:      conn,
+		reader:    frame.NewReaderBuf(br),
+		writeGate: make(chan struct{}, 1),
+		vip:       reply.VIP,
+		deviceID:  reply.DeviceID,
+		sid:       sid,
+		logger:    logger,
+		addr:      addr,
+		conns:     make(map[uint16]PacketSink),
+		pending:   make(map[uint64]chan authResult),
+		dead:      make(chan struct{}),
+		portNext:  firstSrcPort,
 	}
 	t.lastRecv.Store(time.Now().UnixNano())
 	go t.readLoop()
@@ -183,6 +184,10 @@ func (t *Tunnel) DeviceID() string { return t.deviceID }
 
 // Addr is the gateway address this tunnel is connected to.
 func (t *Tunnel) Addr() string { return t.addr }
+
+// SID is the session id this tunnel authenticated with. The manager
+// reconnects when the provider rotates to a new session.
+func (t *Tunnel) SID() string { return t.sid }
 
 // Dead is closed when the tunnel dies (read failure, heartbeat loss).
 func (t *Tunnel) Dead() <-chan struct{} { return t.dead }
@@ -279,7 +284,11 @@ func (t *Tunnel) RequestAuth(ctx context.Context, authID uint64, body []byte) (*
 		t.pendingMu.Unlock()
 	}()
 
-	if err := t.WriteFrame(frame.EncodeAuthRequest(body)); err != nil {
+	authFrame, err := frame.EncodeAuthRequest(body)
+	if err != nil {
+		return nil, err
+	}
+	if err := t.WriteFrame(authFrame, time.Time{}); err != nil {
 		return nil, err
 	}
 
@@ -298,12 +307,13 @@ func (t *Tunnel) RequestAuth(ctx context.Context, authID uint64, body []byte) (*
 }
 
 // SendData sends one full IPv4 packet in an uplink 0x14 data frame.
-func (t *Tunnel) SendData(token string, pkt []byte) error {
+// deadline bounds the serialized socket write (zero = global timeout only).
+func (t *Tunnel) SendData(token string, pkt []byte, deadline time.Time) error {
 	fr, err := frame.EncodeData(token, pkt)
 	if err != nil {
 		return err
 	}
-	return t.WriteFrame(fr)
+	return t.WriteFrame(fr, deadline)
 }
 
 // writeTimeout bounds a single serialized write so a stalled socket cannot
@@ -312,23 +322,62 @@ func (t *Tunnel) SendData(token string, pkt []byte) error {
 const writeTimeout = 30 * time.Second
 
 // WriteFrame serializes a raw frame write (all writers share the lock).
-func (t *Tunnel) WriteFrame(data []byte) error {
+// deadline bounds this write; the global writeTimeout always applies so a
+// stalled socket cannot wedge the lock. Any write error kills the tunnel:
+// a partial frame would desynchronize the multiplexed stream.
+func (t *Tunnel) WriteFrame(data []byte, deadline time.Time) error {
+	if err := t.acquireWrite(deadline); err != nil {
+		return err
+	}
+	defer func() { <-t.writeGate }()
 	if !t.Alive() {
 		return ErrTunnelDead
 	}
-	t.writeMu.Lock()
-	defer t.writeMu.Unlock()
-	if !t.Alive() {
-		return ErrTunnelDead
+	stall := time.Now().Add(writeTimeout)
+	perCall := !deadline.IsZero() && deadline.Before(stall)
+	eff := stall
+	if perCall {
+		eff = deadline
+		if !time.Now().Before(eff) {
+			return os.ErrDeadlineExceeded
+		}
 	}
-	_ = t.conn.SetWriteDeadline(time.Now().Add(writeTimeout))
+	_ = t.conn.SetWriteDeadline(eff)
 	_, err := t.conn.Write(data)
 	_ = t.conn.SetWriteDeadline(time.Time{})
 	if err != nil {
 		t.markDead()
+		if perCall && !time.Now().Before(deadline) {
+			return os.ErrDeadlineExceeded
+		}
 		return err
 	}
 	return nil
+}
+
+func (t *Tunnel) acquireWrite(deadline time.Time) error {
+	if deadline.IsZero() {
+		select {
+		case t.writeGate <- struct{}{}:
+			return nil
+		case <-t.dead:
+			return ErrTunnelDead
+		}
+	}
+	wait := time.Until(deadline)
+	if wait <= 0 {
+		return os.ErrDeadlineExceeded
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case t.writeGate <- struct{}{}:
+		return nil
+	case <-timer.C:
+		return os.ErrDeadlineExceeded
+	case <-t.dead:
+		return ErrTunnelDead
+	}
 }
 
 // --- background loops ---
@@ -401,7 +450,7 @@ func (t *Tunnel) handleAuthResponse(payload []byte) {
 }
 
 // dispatch routes a downlink IPv4 packet to the connection owning the TCP
-// destination port (our virtual source port; TECHNICAL.md §7.4).
+// destination port (our virtual source port).
 func (t *Tunnel) dispatch(pkt []byte) {
 	if len(pkt) < 20 || pkt[0]>>4 != 4 || pkt[9] != 6 {
 		return
@@ -421,8 +470,7 @@ func (t *Tunnel) dispatch(pkt []byte) {
 	sink.DeliverPacket(pkt)
 }
 
-// keepAlive sends heartbeats and declares death on sustained silence
-// (PLAN.md §5.1 active keepalive, replacing the reference's send-only beat).
+// keepAlive sends heartbeats and declares death on sustained silence.
 func (t *Tunnel) keepAlive() {
 	beat := time.NewTicker(HeartbeatInterval)
 	defer beat.Stop()
@@ -431,7 +479,7 @@ func (t *Tunnel) keepAlive() {
 	for {
 		select {
 		case <-beat.C:
-			if err := t.WriteFrame(frame.Heartbeat); err != nil {
+			if err := t.WriteFrame(frame.Heartbeat, time.Time{}); err != nil {
 				t.logger.Debug("tunnel heartbeat send failed", "addr", t.addr, "err", err)
 				t.markDead()
 				return

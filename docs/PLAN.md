@@ -50,14 +50,14 @@
 
   ```go
   type Dialer interface {
-      // 建立到 ip:port 的 TCP 连接(经隧道),返回标准 net.Conn。
-      // ip 必须是已解析的隧道内 IP(由 inbound 经 Resolver 解析后传入)。
-      Dial(ctx context.Context, ip string, port int) (net.Conn, error)
+      // 建立到 ip:port 的隧道 TCP 连接。appID 来自 Resolver;
+      // domain 仅用于后缀通配符授权,其他情况为空。
+      Dial(ctx context.Context, ip string, port int, appID, domain string) (net.Conn, error)
   }
   ```
 
-  inbound(SOCKS5/HTTP)仅依赖 `Dialer`,完全不知晓 aTrust 隧道细节;隧道模块实现该接口。
-  这使得 inbound 可独立测试(注入 mock Dialer),也便于将来替换传输实现。
+  inbound(SOCKS5/HTTP)只依赖 `Dialer`,不需要了解 aTrust 帧格式或用户态 TCP。
+  单测可注入 mock Dialer,传输实现也能独立替换。
 - **`CredentialProvider`(登录 ↔ 隧道)**:
 
   ```go
@@ -68,11 +68,10 @@
   ```
 
   隧道模块只消费 `Credential`,不感知登录流程;登录模块负责产出与刷新凭据。
-- **`Resolver`(域名 → 隧道内 IP)**:将目标域名映射为隧道内可达 IP(来自 clientResource appList,见 TECHNICAL.md §4.2);
-  **映射未命中时回退公网 DNS**,仍失败才判定不可解析。
-  **解析职责在 inbound 层**:inbound 先用 Resolver 把域名解析为隧道内 IP(解析失败可直接回 SOCKS5 的
-  host-unreachable 应答),再以解析后的 IP 调用 `Dialer.Dial`。这样 inbound 能区分「域名不可解析」与「拨号失败」,
-  且 `Dialer` 保持「只接受 IP」的纯粹语义。
+- **`Resolver`(目标解析与授权选择)**:从 clientResource 读取精确域名、IP/CIDR/范围和后缀通配符规则。
+  域名先查精确映射,再用公网 DNS 得到 IPv4 并查 IP 规则;IP 规则未命中时才用后缀通配符。
+  Resolver 返回 IP、`appId` 以及可选 `domain`。解析失败时,inbound 可直接返回 SOCKS5
+  host-unreachable;其他失败按拨号错误处理。解析职责仍留在 inbound 层。
 
 ---
 
@@ -119,26 +118,25 @@ docs/
 
 ---
 
-## 4. 登录与免短信策略(用户体验核心)
+## 4. 登录与短信策略
 
-### 4.1 一次性设置(用户手动,仅一次)
+### 4.1 首次设置
 
 1. **绑定 passkey**:引导用户使用 Python 库 `third_party/shanghaitech-ids-passkey` 的 `bind` 命令
    (需浏览器交互),生成 `keystore` 文件。geekTrust 的 Go 实现**不实现绑定**(绑定涉及浏览器自动化,
    Python 库已完备),仅消费已绑定的 keystore。
-2. **首次登录输入一次短信**:首次以某 `device_id` 登录时,服务器要求短信二次验证(新设备)。用户输入一次即可。
+2. **首次短信验证**:新 `device_id` 首次登录时,服务器要求短信二次验证,无法绕过。
 
-### 4.2 之后全自动(无需任何手动操作)
+### 4.2 自动恢复与再次验证
 
 - **IDS 免密**:Go 移植的 `idsauth` 用 keystore 中的 passkey 私钥完成 WebAuthn assertion 登录,无需密码。
-- **设备信任免短信**:`device_id` 持久化且永不变更。首次验证后该 `device_id` 成为受信设备,
-  此后 `authCheck` 直接通过(`code:0` 且无 `nextService=auth/sms`),**不再需要短信**(TECHNICAL.md §3.5 §12.1)。
+- **稳定设备标识**:`device_id` 持久化且不应更改。更换它会被服务器视为新设备,再次触发短信。
 - **会话持久化与静默重登**:会话凭据(cookies/sid/device_id/网关线路)加密持久化,重启直接复用;
-  会话失效时用 passkey 静默重登(受信设备无需短信)。
+  会话失效时先尝试 passkey 静默重登。
 
-> **关于绕过短信**:经核实,短信二次验证仅在「新设备首次登录」时触发,**无法在首次注册时绕过**;
-> 但通过「持久化受信 device_id + 保持会话/静默重登」,可确保用户**一生只需输入一次短信**。
-> 因此本设计不追求「绕过首次短信」,而是「最大化避免后续短信」,这是可达成的最优体验。
+服务端是否再次要求短信并不完全由 `device_id` 决定。实测中,会话彻底失效后走完整登录流程时,
+服务端可能再次返回 `nextService=auth/sms`。此时 CLI 会提示输入验证码。保持会话存活和复用
+持久化状态可以减少短信次数,但不能保证首次验证后永久免短信。
 
 ### 4.3 Go 移植 ids-passkey 登录(仅登录)
 
@@ -182,7 +180,7 @@ docs/
 
 - **authRequestIP**(`auth.go`):严格按 TECHNICAL.md §6.2 构造(字段顺序、`deviceId` 小写、完整 `env`、
   `procHash`=SHA256(path) 的**大写十六进制**,与 `env…fingerprint` 一致、**不含** `appToken`/`rcAppliedInfo`);
-  `xRequestSig` 可置空(本网关不校验)。
+  `xRequestSig` 可置空。后缀通配符兜底时在 `ip` 后加入可选 `domain`。
 - **用户态 TCP 端点**(`tcpconn.go` + `netstack.go`):
   - 三次握手(SYN/SYN-ACK/ACK),seq/ack 跟踪;
   - 发送按 MSS(1400)分段 PSH+ACK;
@@ -191,7 +189,7 @@ docs/
   - 实现 `net.Conn` 接口,供 inbound 直接读写。`SetReadDeadline/SetDeadline` 映射到读缓冲 + 定时器
     (读超时返回 timeout 错误);`SetWriteDeadline` 约束发送入队超时(写本身经隧道锁串行发出);
     `LocalAddr`=VIP:srcPort,`RemoteAddr`=dstIP:dstPort。
-- **Dialer 实现**:`l3` 提供 `Dial(ctx, ip, port)`(**入参为已解析的隧道内 IP**,域名解析在 inbound 层完成):
+- **Dialer 实现**:`l3` 接收已解析的 IP、端口、`appId` 和可选域名:
   分配源端口 → per-conn auth 取 connectToken(失败退避重试,见 §6.1)→ 建立 TCPConn → 返回 `net.Conn`。
 
 ---
@@ -210,7 +208,7 @@ docs/
 | -------- | -------------------------------------------------------------- |
 | 隧道     | 心跳(20s,连续多次丢失判死,见 TECHNICAL.md §5.4)+ 指数退避重连 |
 | 线路     | 多线路探测择优 + 错误码触发换线                                |
-| 会话     | 周期`onlineInfo` 检测 + 失效静默重登(passkey,受信设备免短信) |
+| 会话     | 周期`onlineInfo` 检测 + 失效后 passkey 重登;服务端要求时提示短信 |
 | 凭据     | 加密持久化,重启复用                                            |
 | 网络变化 | 可选监听系统网络事件,主动重建隧道                              |
 | 入口连接 | 每连接独立 goroutine,单连接失败不影响整体;优雅退出             |
@@ -228,7 +226,7 @@ docs/
 - **SOCKS5**(`socks5.go`):`127.0.0.1:1080`,支持 CONNECT(TECHNICAL.md §9.1)。UDP ASSOCIATE 暂不实现
   (TECHNICAL.md 仅给出 `ip.protocol=17` 的 UDP 每连接认证字段,UDP 数据帧/中继规格待补充后再议)。
 - **HTTP CONNECT**(`http.go`):`127.0.0.1:8080`。
-- **无认证**(可配置开启);域名经 Resolver 映射为隧道内 IP。
+- **无认证**(可配置开启);Resolver 为目标选择 IP、`appId` 和可选域名。
 - inbound 通过 `Dialer` 接口建立连接,与隧道完全解耦,可独立单测(mock Dialer)。
 
 ---
@@ -265,7 +263,7 @@ state_file = "./state.enc"              # 加密会话凭据(0600)
 
 | 里程碑                | 内容                                                                                                | 验收                                             |
 | --------------------- | --------------------------------------------------------------------------------------------------- | ------------------------------------------------ |
-| **M1 登录(Go)** | `idsauth` passkey 登录 + `sdpc` 控制面(authConfig/CAS/reportEnv/authCheck/sms/会话)+ 凭据持久化 | 命令行登录成功,产出 sid;受信设备免短信           |
+| **M1 登录(Go)** | `idsauth` passkey 登录 + `sdpc` 控制面(authConfig/CAS/reportEnv/authCheck/sms/会话)+ 凭据持久化 | 命令行登录成功并产出 sid;服务端要求时完成短信验证 |
 | **M2 隧道**     | `frame` 编解码 + `tunnel`(TLS/认证/VIP/心跳/重连/换线)                                          | 隧道认证得 VIP,心跳稳定,断线自动重连             |
 | **M3 数据面**   | `l3` 每连接认证 + 用户态 TCP(重组)+ `Dialer`                                                    | 经隧道建立 TCP 连接到 library:443,完成 TLS 握手  |
 | **M4 代理入口** | `inbound` SOCKS5/HTTP(依赖 Dialer)+ Resolver                                                      | `curl --socks5-hostname` 访问 library 返回 200 |
@@ -280,7 +278,7 @@ state_file = "./state.enc"              # 加密会话凭据(0600)
   以及 `/qbsjk/list.htm`(`全部数据库`)。
 - 协议全部细节(请求/响应结构、字段、状态码、帧格式、TCP 重组、IP 包拆分)已固化为 [`TECHNICAL.md`](./TECHNICAL.md),
   Go 实现按该规格逐模块对照实现即可,无未决协议风险。
-- 免短信体验依赖「受信 device_id」机制,已实测验证(固定 device_id 后续登录 authCheck 直接通过)。
+- 固定 `device_id` 和复用持久化会话可减少短信验证;服务端在后续完整登录中仍可能再次要求短信。
 
 ## 11. 参考
 

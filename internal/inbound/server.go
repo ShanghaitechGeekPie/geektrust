@@ -1,6 +1,6 @@
 // Package inbound exposes the tunnel as local SOCKS5 and HTTP CONNECT
 // proxies. It depends only on the Dialer and Resolver contracts, never on
-// aTrust internals (PLAN.md §2.1, §7).
+// aTrust internals.
 package inbound
 
 import (
@@ -13,22 +13,25 @@ import (
 	"time"
 
 	"geektrust/internal/config"
+	"geektrust/internal/resolver"
 )
 
 // maxConcurrent caps per-listener connections so a runaway client cannot
-// exhaust goroutines or tunnel conntrack slots (PLAN.md §6.3).
+// exhaust goroutines or tunnel conntrack slots.
 const maxConcurrent = 256
 
 // Dialer establishes a TCP connection through the tunnel to an
-// already-resolved IP (PLAN.md §2.1). Implemented by l3.Dialer.
+// already-resolved IP under the given authorizing app. Implemented by
+// l3.Dialer.
 type Dialer interface {
-	Dial(ctx context.Context, ip string, port int) (net.Conn, error)
+	Dial(ctx context.Context, ip string, port int, appID, domain string) (net.Conn, error)
 }
 
-// Resolver maps a target host to a tunnel IP and authorizing appId.
-// Implemented by resolver.Resolver.
+// Resolver maps a target host to a tunnel target (IP, authorizing appId,
+// and the domain for wildcard-authorized dials). Implemented by
+// resolver.Resolver.
 type Resolver interface {
-	Resolve(ctx context.Context, host string) (ip string, appID string, err error)
+	Resolve(ctx context.Context, host string, port int) (resolver.Resolution, error)
 }
 
 // Server runs the SOCKS5 and HTTP CONNECT listeners.
@@ -152,8 +155,8 @@ func (s *Server) track(c net.Conn, add bool) {
 	s.mu.Unlock()
 }
 
-// relayPair copies both directions until the first side ends, then tears the
-// pair down (the reference's shared stop event).
+// relayPair copies both directions until the first side ends, then tears
+// the pair down.
 func relayPair(a, b io.ReadWriteCloser) {
 	done := make(chan struct{}, 2)
 	go func() { io.Copy(a, b); done <- struct{}{} }()

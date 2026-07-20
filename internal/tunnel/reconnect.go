@@ -19,8 +19,7 @@ const (
 
 // Manager owns the live tunnel: it (re)connects on demand with exponential
 // backoff, switches gateway lines on tunnel-layer error codes, and forces a
-// silent re-login when tunnel authentication keeps rejecting the session
-// (PLAN.md §5.1, §6.2; TECHNICAL.md §12).
+// silent re-login when tunnel authentication keeps rejecting the session.
 type Manager struct {
 	provider session.CredentialProvider
 	logger   *slog.Logger
@@ -47,13 +46,24 @@ func NewManager(provider session.CredentialProvider, logger *slog.Logger) *Manag
 	return &Manager{provider: provider, logger: logger}
 }
 
-// Tunnel returns a live tunnel, connecting or reconnecting as needed.
-// Concurrent callers share one in-flight connect attempt.
+// Tunnel returns a live tunnel authenticated with the current session,
+// connecting or reconnecting as needed. A tunnel left over from a rotated
+// session is closed and re-established. Concurrent callers share one
+// in-flight connect attempt.
 func (m *Manager) Tunnel(ctx context.Context) (*Tunnel, error) {
+	cred, err := m.provider.Credential(ctx)
+	if err != nil {
+		return nil, err
+	}
 	m.mu.Lock()
-	if t := m.cur; t != nil && t.Alive() {
+	if t := m.cur; t != nil && t.Alive() && t.SID() == cred.SID {
 		m.mu.Unlock()
 		return t, nil
+	}
+	// Dead, or authenticated with a since-rotated session.
+	if t := m.cur; t != nil {
+		t.Close()
+		m.cur = nil
 	}
 	call := m.connecting
 	if call == nil {
@@ -84,7 +94,7 @@ func (m *Manager) Tunnel(ctx context.Context) (*Tunnel, error) {
 
 // SwitchLine rotates the preferred gateway line and kills the current tunnel
 // so the next use reconnects elsewhere. Called when per-connection auth
-// reports a line-switch code (TECHNICAL.md §11.2, §12.4).
+// reports a line-switch code.
 func (m *Manager) SwitchLine() {
 	m.mu.Lock()
 	t := m.cur
@@ -121,10 +131,14 @@ func (m *Manager) Close() {
 // failures eventually invalidate the session for a silent re-login.
 func (m *Manager) connect(ctx context.Context) (*Tunnel, error) {
 	backoff := reconnectBase
-	// Distinct lines that rejected tunnel auth under the current session;
-	// the session is invalidated only once EVERY line has rejected it
-	// (a single unhealthy line must not burn a valid session).
+	// Per session generation: which lines were tried at all, and which
+	// reached tunnel auth and rejected it. The session is invalidated only
+	// once every configured line has been tried and at least one rejection
+	// came back from the auth stage (lines failing at TCP/TLS never reach
+	// auth — e.g. internal gateways seen from outside — and must not block
+	// the refresh decision).
 	authRejects := make(map[string]int64)
+	tried := make(map[string]bool)
 	rejectSID := ""
 	for {
 		if err := ctx.Err(); err != nil {
@@ -136,6 +150,7 @@ func (m *Manager) connect(ctx context.Context) (*Tunnel, error) {
 		} else {
 			if cred.SID != rejectSID {
 				authRejects = make(map[string]int64)
+				tried = make(map[string]bool)
 				rejectSID = cred.SID
 			}
 			lines := m.ensureLines(cred.Gateways)
@@ -153,6 +168,7 @@ func (m *Manager) connect(ctx context.Context) (*Tunnel, error) {
 				return nil, ctx.Err()
 			}
 			lines.ReportFailure(addr)
+			tried[addr] = true
 
 			var authErr *frame.TunnelAuthError
 			if errors.As(err, &authErr) {
@@ -160,13 +176,14 @@ func (m *Manager) connect(ctx context.Context) (*Tunnel, error) {
 					lines.Rotate()
 				} else {
 					authRejects[addr] = authErr.Code
-					if len(authRejects) >= len(cred.Gateways) {
-						m.logger.Warn("tunnel auth rejected on every line; re-logging in",
-							"code", authErr.Code)
-						m.provider.Invalidate()
-						authRejects = make(map[string]int64)
-					}
 				}
+			}
+			if len(tried) >= len(cred.Gateways) && len(authRejects) > 0 {
+				m.logger.Warn("tunnel auth rejected on every reachable line; re-logging in",
+					"rejects", len(authRejects))
+				m.provider.Invalidate()
+				authRejects = make(map[string]int64)
+				tried = make(map[string]bool)
 			}
 		}
 

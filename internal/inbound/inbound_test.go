@@ -16,9 +16,18 @@ import (
 // mockDialer echoes everything it receives, proving end-to-end relay.
 type mockDialer struct {
 	dialErr error
+	calls   chan dialCall
 }
 
-func (m *mockDialer) Dial(ctx context.Context, ip string, port int) (net.Conn, error) {
+type dialCall struct {
+	ip, appID, domain string
+	port              int
+}
+
+func (m *mockDialer) Dial(ctx context.Context, ip string, port int, appID, domain string) (net.Conn, error) {
+	if m.calls != nil {
+		m.calls <- dialCall{ip: ip, port: port, appID: appID, domain: domain}
+	}
 	if m.dialErr != nil {
 		return nil, m.dialErr
 	}
@@ -34,23 +43,31 @@ func (m *mockDialer) Dial(ctx context.Context, ip string, port int) (net.Conn, e
 
 type mockResolver struct {
 	m       map[string]string
+	result  *resolver.Resolution
 	failAll bool
 }
 
-func (m *mockResolver) Resolve(ctx context.Context, host string) (string, string, error) {
+func (m *mockResolver) Resolve(ctx context.Context, host string, port int) (resolver.Resolution, error) {
 	if m.failAll {
-		return "", "", fmt.Errorf("%w: %s", resolver.ErrUnresolvable, host)
+		return resolver.Resolution{}, fmt.Errorf("%w: %s", resolver.ErrUnresolvable, host)
+	}
+	if m.result != nil {
+		return *m.result, nil
 	}
 	if ip, ok := m.m[host]; ok {
-		return ip, "app-id", nil
+		return resolver.Resolution{IP: ip, AppID: "app-id"}, nil
 	}
-	return host, "app-id", nil
+	return resolver.Resolution{IP: host, AppID: "app-id"}, nil
 }
 func testInboundCfg() config.Inbound { return config.Inbound{} }
 
 func TestSOCKS5ConnectRelay(t *testing.T) {
-	s := New(testInboundCfg(), &mockResolver{m: map[string]string{"library.example": "10.15.45.163"}},
-		&mockDialer{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	resolved := resolver.Resolution{
+		IP: "10.15.45.163", AppID: "electronic-resource", Domain: "library.example",
+	}
+	dialer := &mockDialer{calls: make(chan dialCall, 1)}
+	s := New(testInboundCfg(), &mockResolver{result: &resolved},
+		dialer, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	client, srv := net.Pipe()
 	go s.handleSOCKS5(context.Background(), srv)
@@ -77,6 +94,10 @@ func TestSOCKS5ConnectRelay(t *testing.T) {
 	}
 	if reply[1] != 0x00 {
 		t.Fatalf("connect reply code = 0x%02x", reply[1])
+	}
+	call := <-dialer.calls
+	if call.ip != resolved.IP || call.port != 443 || call.appID != resolved.AppID || call.domain != resolved.Domain {
+		t.Fatalf("dial call = %+v", call)
 	}
 
 	// Echo through the relay.

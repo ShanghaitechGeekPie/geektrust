@@ -1,31 +1,173 @@
 package sdpc
 
 import (
+	"bytes"
 	"context"
-	"encoding/json"
-	"fmt"
+	"encoding/binary"
 	"net"
 	"net/url"
+	"strconv"
 	"strings"
 )
 
-// AppEndpoint is a resolved tunnel target: the internal IP plus the app that
-// authorizes it.
-type AppEndpoint struct {
-	IP    string
-	AppID string
-}
-
-// Resource is the parsed clientResource payload (TECHNICAL.md §4).
+// Resource is the parsed clientResource routing policy: which appId
+// authorizes which destination (domain/internal IP/CIDR/range × port
+// range), plus gateway lines and DNS servers.
 type Resource struct {
-	// DomainMap maps a domain to its first internal IP and owning app.
-	DomainMap map[string]AppEndpoint
-	// IPApps maps an internal IP to its owning app (for direct-IP targets).
-	IPApps map[string]string
-	// Gateways are the node group access addresses (host:port, default 441).
+	// DomainRules map exact domains to internal endpoints.
+	DomainRules []DomainRule
+	// SuffixRules map TLD wildcards ("*.com" → ".com") to apps; the dial
+	// target is the DNS-resolved address of the host.
+	SuffixRules []SuffixRule
+	// IPRules match destination IPs (exact/CIDR/range × port range).
+	IPRules []IPRule
+	// Gateways are the node group access addresses (host:port).
 	Gateways []string
 	// DNS are controller-pushed resolver addresses, if any.
 	DNS []string
+}
+
+// DomainRule is one domain entry of an app's addressList.
+type DomainRule struct {
+	Domain string
+	IP     string // first internal IP of the same app: the dial target
+	AppID  string
+	Port   PortRange
+	Proto  string // tcp / udp / all
+}
+
+// SuffixRule is one "*.tld" entry of an app's addressList.
+type SuffixRule struct {
+	Suffix string // ".com", ".cn", …
+	AppID  string
+	Port   PortRange
+	Proto  string
+}
+
+// IPRule is one IP/CIDR/range entry of an app's addressList.
+type IPRule struct {
+	IP    net.IP     // exact address
+	Net   *net.IPNet // CIDR prefix
+	IPMin net.IP     // inclusive range start (with IPMax)
+	IPMax net.IP
+	AppID string
+	Port  PortRange
+	Proto string
+}
+
+// PortRange is an inclusive port interval.
+type PortRange struct{ Min, Max int }
+
+// Contains reports whether port falls in the range.
+func (r PortRange) Contains(port int) bool { return port >= r.Min && port <= r.Max }
+
+func allPorts() PortRange { return PortRange{0, 65535} }
+
+// MatchDomain returns the rule authorizing domain:port (TCP). When several
+// rules cover the port, the narrowest port range wins (an app authorizing
+// exactly 443 beats a catch-all 0-65535 entry); ties keep appList order.
+func (r *Resource) MatchDomain(domain string, port int) (DomainRule, bool) {
+	domain = normalizeHost(domain)
+	var best DomainRule
+	bestWidth := 1 << 30
+	found := false
+	for _, rule := range r.DomainRules {
+		if rule.Domain != domain || !rule.Port.Contains(port) || !tcpCompatible(rule.Proto) {
+			continue
+		}
+		if width := rule.Port.Max - rule.Port.Min; !found || width < bestWidth {
+			best, bestWidth, found = rule, width, true
+		}
+	}
+	return best, found
+}
+
+// MatchSuffix returns the rule whose TLD wildcard covers host:port (TCP).
+// The longest suffix wins; ties keep appList order.
+func (r *Resource) MatchSuffix(host string, port int) (SuffixRule, bool) {
+	host = normalizeHost(host)
+	var best SuffixRule
+	found := false
+	for _, rule := range r.SuffixRules {
+		if !strings.HasSuffix(host, rule.Suffix) || !rule.Port.Contains(port) || !tcpCompatible(rule.Proto) {
+			continue
+		}
+		if !found || len(rule.Suffix) > len(best.Suffix) {
+			best, found = rule, true
+		}
+	}
+	return best, found
+}
+
+// normalizeHost lowercases a hostname and strips one trailing root dot.
+func normalizeHost(host string) string {
+	return strings.TrimSuffix(strings.ToLower(host), ".")
+}
+
+// MatchIP returns the most specific rule authorizing ip:port (TCP).
+// Exact addresses win. CIDRs and ranges are compared by the number of
+// addresses they cover, so a 10/8 range beats a /0 catch-all while a /16
+// beats that range. Ties keep appList order.
+func (r *Resource) MatchIP(ip net.IP, port int) (IPRule, bool) {
+	ip4 := ip.To4()
+	if ip4 == nil {
+		return IPRule{}, false
+	}
+	var best IPRule
+	bestExact := false
+	bestSpan := ^uint64(0)
+	found := false
+	for _, rule := range r.IPRules {
+		if !rule.Port.Contains(port) || !tcpCompatible(rule.Proto) {
+			continue
+		}
+		exact := false
+		span := ^uint64(0)
+		switch {
+		case rule.IP != nil:
+			if rule.IP.Equal(ip4) {
+				exact, span = true, 1
+			}
+		case rule.Net != nil:
+			if rule.Net.Contains(ip4) {
+				ones, bits := rule.Net.Mask.Size()
+				if bits == 32 && ones >= 0 {
+					span = uint64(1) << uint(32-ones)
+				}
+			}
+		case rule.IPMin != nil && rule.IPMax != nil:
+			min, max := rule.IPMin.To4(), rule.IPMax.To4()
+			if min != nil && max != nil && bytes.Compare(min, max) <= 0 &&
+				bytes.Compare(ip4, min) >= 0 && bytes.Compare(ip4, max) <= 0 {
+				span = uint64(ipToU32(max)-ipToU32(min)) + 1
+			}
+		}
+		if span == ^uint64(0) {
+			continue
+		}
+		if !found || (exact && !bestExact) || (exact == bestExact && span < bestSpan) {
+			best, bestExact, bestSpan, found = rule, exact, span, true
+		}
+	}
+	return best, found
+}
+
+func ipToU32(ip net.IP) uint32 {
+	v4 := ip.To4()
+	return binary.BigEndian.Uint32(v4)
+}
+
+// AppIDFor returns the appId authorizing ip:port, or fallback when no rule
+// matches.
+func (r *Resource) AppIDFor(ip net.IP, port int, fallback string) string {
+	if rule, ok := r.MatchIP(ip, port); ok {
+		return rule.AppID
+	}
+	return fallback
+}
+
+func tcpCompatible(proto string) bool {
+	return proto == "" || proto == "tcp" || proto == "all"
 }
 
 // clientResource mirrors the response parts geekTrust consumes. Decoding is
@@ -72,23 +214,10 @@ type clientResource struct {
 	} `json:"sdpPolicy"`
 }
 
-// ClientResource fetches the app/resource list via the unsigned browser path
-// (TECHNICAL.md §4.1) and derives the domain map and gateway lines.
+// ClientResource fetches the full resource policy via the unsigned browser
+// path. The appList includes the catch-all apps (外网资源/内网资源段) that
+// authorize nearly all internal/external destinations.
 func (c *Client) ClientResource(ctx context.Context) (*Resource, error) {
-	rawJSON, err := c.RawClientResource(ctx)
-	if err != nil {
-		return nil, err
-	}
-	var raw clientResource
-	if err := json.Unmarshal(rawJSON, &raw); err != nil {
-		return nil, fmt.Errorf("clientResource: decode: %w", err)
-	}
-	return c.parseResource(&raw), nil
-}
-
-// RawClientResource returns the unparsed data payload of clientResource,
-// useful for diagnostics.
-func (c *Client) RawClientResource(ctx context.Context) (json.RawMessage, error) {
 	body := map[string]any{
 		"resourceType": map[string]any{
 			"sdpPolicy":       map[string]any{},
@@ -98,52 +227,76 @@ func (c *Client) RawClientResource(ctx context.Context) (json.RawMessage, error)
 			"uemSpace":        map[string]any{"params": map[string]string{"action": "login"}},
 		},
 	}
-	var data json.RawMessage
-	if err := c.doJSON(ctx, "POST", "/controller/v1/user/clientResource", url.Values{}, body, &data); err != nil {
+	var raw clientResource
+	if err := c.doJSON(ctx, "POST", "/controller/v1/user/clientResource", url.Values{}, body, &raw); err != nil {
 		return nil, err
 	}
-	return data, nil
+	return c.parseResource(&raw), nil
 }
 
-// parseResource builds the domain→internal-IP map (TECHNICAL.md §4.2) and the
-// gateway line list (§4.3), following the reference build_domain_map rules:
-// strip "@suffix"; pure dotted-numeric hosts are internal IPs; hosts with
-// "*", "-" or "/" are ranges and never mapped; each domain maps to the first
-// internal IP of the same app.
+// parseResource builds the routing policy from the appList (incl. the
+// catch-all apps 外网资源/内网资源段) and the gateway lines.
 func (c *Client) parseResource(cr *clientResource) *Resource {
-	res := &Resource{
-		DomainMap: make(map[string]AppEndpoint),
-		IPApps:    make(map[string]string),
-	}
+	res := &Resource{}
 	for _, group := range cr.AppList.Data.AppInfo {
 		for _, app := range group.Apps {
-			var ips, domains []string
+			var firstIP string
+			type hostEntry struct {
+				host  string
+				port  PortRange
+				proto string
+			}
+			var domains []hostEntry
 			for _, entry := range app.AddressList {
 				host := entry.Host
 				if i := strings.IndexByte(host, '@'); i >= 0 {
 					host = host[i+1:]
 				}
+				port := parsePortRange(entry.Port)
+				proto := entry.Protocol
 				switch {
 				case host == "":
+				case strings.HasPrefix(host, "*."):
+					// TLD wildcard (*.com / *.cn …): suffix match; the dial
+					// target is whatever the name resolves to.
+					res.SuffixRules = append(res.SuffixRules, SuffixRule{
+						Suffix: strings.ToLower(host[1:]), AppID: app.ID, Port: port, Proto: proto,
+					})
+				case strings.Contains(host, "*"):
+					// Other wildcard shapes cannot be matched; skip.
 				case isDottedIPv4(host):
-					ips = append(ips, host)
-					if _, ok := res.IPApps[host]; !ok {
-						res.IPApps[host] = app.ID
+					if firstIP == "" {
+						firstIP = host
 					}
-				case !strings.ContainsAny(host, "*-/"):
-					domains = append(domains, host)
+					res.IPRules = append(res.IPRules, IPRule{
+						IP: net.ParseIP(host).To4(), AppID: app.ID, Port: port, Proto: proto,
+					})
+				case strings.Contains(host, "/"):
+					if _, ipNet, err := net.ParseCIDR(host); err == nil {
+						res.IPRules = append(res.IPRules, IPRule{
+							Net: ipNet, AppID: app.ID, Port: port, Proto: proto,
+						})
+					}
+				case strings.Contains(host, "-"):
+					parts := strings.SplitN(host, "-", 2)
+					min, max := net.ParseIP(parts[0]), net.ParseIP(parts[1])
+					if min != nil && max != nil {
+						res.IPRules = append(res.IPRules, IPRule{
+							IPMin: min, IPMax: max, AppID: app.ID, Port: port, Proto: proto,
+						})
+					}
+				default:
+					domains = append(domains, hostEntry{host, port, proto})
 				}
 			}
-			if len(ips) > 0 {
-				for _, domain := range domains {
-					// First-wins: an address shared by several apps (e.g.
-					// 10.15.45.163 belongs to both 电子资源 and a security
-					// agent app) must keep the first declaring app, or the
-					// gateway's per-conn address check rejects the dial
-					// (code 10000005).
-					if _, ok := res.DomainMap[domain]; !ok {
-						res.DomainMap[domain] = AppEndpoint{IP: ips[0], AppID: app.ID}
-					}
+			// Domain → first internal IP of the same app, keeping each
+			// domain entry's own authorized port range. MatchDomain picks
+			// the most specific rule per (domain, port).
+			if firstIP != "" {
+				for _, d := range domains {
+					res.DomainRules = append(res.DomainRules, DomainRule{
+						Domain: normalizeHost(d.host), IP: firstIP, AppID: app.ID, Port: d.port, Proto: d.proto,
+					})
 				}
 			}
 		}
@@ -183,6 +336,27 @@ func (c *Client) parseResource(cr *clientResource) *Resource {
 	return res
 }
 
+// parsePortRange parses addressList port specs: "443", "1-65535", "" / "all".
+func parsePortRange(s string) PortRange {
+	s = strings.TrimSpace(s)
+	if s == "" || s == "all" {
+		return allPorts()
+	}
+	if lo, hi, ok := strings.Cut(s, "-"); ok {
+		min, err1 := strconv.Atoi(strings.TrimSpace(lo))
+		max, err2 := strconv.Atoi(strings.TrimSpace(hi))
+		if err1 == nil && err2 == nil {
+			return PortRange{min, max}
+		}
+		return allPorts()
+	}
+	port, err := strconv.Atoi(s)
+	if err != nil {
+		return allPorts()
+	}
+	return PortRange{port, port}
+}
+
 func (c *Client) controllerHost() string {
 	u, err := url.Parse(c.BaseURL)
 	if err != nil {
@@ -191,8 +365,6 @@ func (c *Client) controllerHost() string {
 	return u.Hostname()
 }
 
-// isDottedIPv4 reports whether s is a plain dotted-quad (the reference uses
-// host.replace(".", "").isdigit()).
 func isDottedIPv4(s string) bool {
 	if s == "" {
 		return false
@@ -202,5 +374,6 @@ func isDottedIPv4(s string) bool {
 			return false
 		}
 	}
-	return net.ParseIP(s) != nil && net.ParseIP(s).To4() != nil && !strings.Contains(s, ":")
+	ip := net.ParseIP(s)
+	return ip != nil && ip.To4() != nil
 }

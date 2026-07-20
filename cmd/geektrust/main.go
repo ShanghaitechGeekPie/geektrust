@@ -1,6 +1,6 @@
 // geekTrust is a pure-userspace client for the ShanghaiTech aTrust VPN:
-// passkey login, TLS tunnel, per-connection auth with userspace TCP, exposed
-// as local SOCKS5/HTTP proxies. See docs/PLAN.md and docs/TECHNICAL.md.
+// passkey login, TLS tunnel, per-connection auth with userspace TCP,
+// exposed as local SOCKS5/HTTP proxies.
 package main
 
 import (
@@ -14,7 +14,6 @@ import (
 	"net"
 	"os"
 	"os/signal"
-	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -32,7 +31,7 @@ func main() {
 	var configPath string
 	flag.StringVar(&configPath, "config", "config.toml", "path to the TOML config file")
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: geektrust [-config config.toml] <command>\n\nCommands:\n  run               ensure a session, then start the SOCKS5/HTTP proxies (default)\n  login             establish a VPN session (passkey; SMS once per new device)\n  dial <host[:port]>  connect through the tunnel (TLS handshake on :443)\n")
+		fmt.Fprintf(os.Stderr, "Usage: geektrust [-config config.toml] <command>\n\nCommands:\n  run               ensure a session, then start the SOCKS5/HTTP proxies (default)\n  login             establish a VPN session (passkey; SMS when required)\n  dial <host[:port]>  connect through the tunnel (TLS handshake on :443)\n")
 		flag.PrintDefaults()
 	}
 	flag.Parse()
@@ -132,21 +131,23 @@ func printSummary(cred *session.Credential) {
 	fmt.Printf("sid:       %s (redacted)\n", session.ShortSID(cred.SID))
 	fmt.Printf("device_id: %s\n", cred.DeviceID)
 	fmt.Printf("gateways:  %s\n", strings.Join(cred.Gateways, ", "))
-	domains := make([]string, 0, len(cred.DomainMap))
-	for d := range cred.DomainMap {
-		domains = append(domains, d)
+	apps := make(map[string]bool)
+	for _, r := range cred.Policy.DomainRules {
+		apps[r.AppID] = true
 	}
-	sort.Strings(domains)
-	fmt.Printf("domain map (%d):\n", len(domains))
-	for _, d := range domains {
-		ep := cred.DomainMap[d]
-		fmt.Printf("  %-40s -> %s (app %s)\n", d, ep.IP, ep.AppID)
+	for _, r := range cred.Policy.SuffixRules {
+		apps[r.AppID] = true
 	}
+	for _, r := range cred.Policy.IPRules {
+		apps[r.AppID] = true
+	}
+	fmt.Printf("policy:    %d domain rules, %d suffix rules, %d ip rules, %d apps\n",
+		len(cred.Policy.DomainRules), len(cred.Policy.SuffixRules), len(cred.Policy.IPRules), len(apps))
 }
 
-// smsPrompt reads the one-time SMS code from stdin (new device only).
+// smsPrompt reads the SMS code from stdin whenever the controller demands it.
 func smsPrompt(ctx context.Context) (string, error) {
-	fmt.Fprintln(os.Stderr, "This device_id is not trusted yet; an SMS verification code was sent to your phone.")
+	fmt.Fprintln(os.Stderr, "The controller requires SMS verification; a code was sent to your phone.")
 	fmt.Fprint(os.Stderr, "Enter the 6-digit code: ")
 	type result struct {
 		code string
@@ -176,7 +177,7 @@ func smsPrompt(ctx context.Context) (string, error) {
 }
 
 // cmdDial connects to a tunnel target and, for port 443, completes a TLS
-// handshake — the M3 acceptance check (TCP-over-tunnel to library:443).
+// handshake — a quick end-to-end check of the tunnel and data plane.
 func cmdDial(ctx context.Context, cfg *config.Config, logger *slog.Logger, args []string) error {
 	if len(args) != 1 {
 		return errors.New("usage: geektrust dial <host[:port]>")
@@ -191,10 +192,10 @@ func cmdDial(ctx context.Context, cfg *config.Config, logger *slog.Logger, args 
 	}
 
 	provider := session.NewProvider(cfg, logger, smsPrompt)
-	// Resolve exactly like the inbound layer: domain map first, public DNS
-	// fallback (via the configured servers).
+	// Resolve exactly like the inbound layer: exact domain mapping first,
+	// then DNS-resolved IP policy, with domain wildcards as a fallback.
 	res := resolver.New(provider, cfg.DNS)
-	ip, _, err := res.Resolve(ctx, host)
+	target, err := res.Resolve(ctx, host, port)
 	if err != nil {
 		return err
 	}
@@ -204,7 +205,7 @@ func cmdDial(ctx context.Context, cfg *config.Config, logger *slog.Logger, args 
 	dialer := &l3.Dialer{Manager: manager, Provider: provider, Logger: logger}
 
 	start := time.Now()
-	conn, err := dialer.Dial(ctx, ip, port)
+	conn, err := dialer.Dial(ctx, target.IP, port, target.AppID, target.Domain)
 	if err != nil {
 		return err
 	}

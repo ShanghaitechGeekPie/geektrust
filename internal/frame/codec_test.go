@@ -223,10 +223,27 @@ func TestReadFrameDataLenModeZero(t *testing.T) {
 
 func TestEncodeAuthRequestLayout(t *testing.T) {
 	body := []byte(`{"sid":"s"}`)
-	raw := EncodeAuthRequest(body)
+	raw, err := EncodeAuthRequest(body)
+	if err != nil {
+		t.Fatal(err)
+	}
 	want := append([]byte{0x05, 0x13, 0x00, byte(len(body))}, body...)
 	if !bytes.Equal(raw, want) {
 		t.Errorf("EncodeAuthRequest = %x, want %x", raw, want)
+	}
+}
+
+func TestEncodeLengthBounds(t *testing.T) {
+	big := make([]byte, 65536)
+	if _, err := EncodeAuthRequest(big); err == nil {
+		t.Error("oversize auth body accepted")
+	}
+	ok := make([]byte, 65535)
+	if _, err := EncodeAuthRequest(ok); err != nil {
+		t.Errorf("65535-byte auth body rejected: %v", err)
+	}
+	if _, err := EncodeTunnelAuth(strings.Repeat("s", 70000)); err == nil {
+		t.Error("oversize tunnel auth sid accepted")
 	}
 }
 

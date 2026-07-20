@@ -18,8 +18,8 @@ const (
 	failCooldown = 90 * time.Second
 )
 
-// Lines tracks the ordered gateway line pool (TECHNICAL.md §4.3, §12.4):
-// probes pick the lowest-latency reachable line, failures rotate the pool.
+// Lines tracks the ordered gateway line pool: probes pick the
+// lowest-latency reachable line, failures rotate the pool.
 type Lines struct {
 	mu     sync.Mutex
 	addrs  []string
