@@ -99,10 +99,9 @@ geektrust/
       tunnel.go                    #   L3Tunnel:连接/认证/VIP/心跳/reader 循环
       line.go                      #   线路探测择优 + 失败切换
       reconnect.go                 #   指数退避重连
-    l3/                            # 每连接认证 + 用户态 TCP(Dialer 实现)
+    l3/                            # 每连接认证 + gVisor 用户态 TCP(Dialer 实现)
       auth.go                      #   authRequestIP 构造、per-conn auth(0x13/0x93)
-      tcpconn.go                   #   用户态 TCP 端点:握手/seq-ack/重组/中继
-      netstack.go                  #   IPv4/TCP 包构造与校验和
+      gvisor.go                    #   IPv4 link endpoint、完整 TCP 栈、net.Conn 封装
     inbound/                       # 代理入口(仅依赖 Dialer)
       socks5.go                    #   SOCKS5(CONNECT;UDP ASSOCIATE 暂不实现)
       http.go                      #   HTTP CONNECT
@@ -176,21 +175,20 @@ docs/
 - **重连**(`reconnect.go`):指数退避(1s→30s 封顶);连续失败用持久化凭据静默重登;
   错误码 `10000002~4`/`99700001` 触发换线。
 
-### 5.2 每连接认证与用户态 TCP(`l3/`)
+### 5.2 每连接认证与用户态 TCP 栈(`l3/`)
 
 - **authRequestIP**(`auth.go`):严格按 TECHNICAL.md §6.2 构造(字段顺序、`deviceId` 小写、完整 `env`、
   `procHash`=SHA256(path) 的**大写十六进制**,与 `env…fingerprint` 一致、**不含** `appToken`/`rcAppliedInfo`);
   `xRequestSig` 可置空。后缀通配符兜底时在 `ip` 后加入可选 `domain`。
-- **用户态 TCP 端点**(`tcpconn.go` + `netstack.go`):
-  - 三次握手(SYN/SYN-ACK/ACK),seq/ack 跟踪;
-  - 发送按 MSS(1400)分段 PSH+ACK;
-  - 接收 TCP 重组:有序追加、乱序缓存、重传/重叠去重(TECHNICAL.md §8.3);
-  - FIN/RST 处理;
-  - 实现 `net.Conn` 接口,供 inbound 直接读写。`SetReadDeadline/SetDeadline` 映射到读缓冲 + 定时器
-    (读超时返回 timeout 错误);`SetWriteDeadline` 约束发送入队超时(写本身经隧道锁串行发出);
-    `LocalAddr`=VIP:srcPort,`RemoteAddr`=dstIP:dstPort。
+- **用户态 TCP 栈**(`gvisor.go`):
+  - 每条活隧道复用一个 gVisor IPv4/TCP stack,自定义 link endpoint 的 MTU 为 1400;
+  - gVisor 负责三次握手、重传、拥塞/流量控制、窗口缩放、SACK、乱序重组和 FIN/RST/TIME_WAIT;
+  - link endpoint 按源端口取得该连接的 connectToken,把完整 IPv4 包封入 0x14 帧;
+    同一 token 的连续包合并进一个多包帧,减少 TLS 与串行 socket write 开销;
+  - 通过 `gonet.TCPConn` 实现标准 `net.Conn` 及 `CloseWrite`,供 inbound 透明转发任意 TCP 上层协议。
 - **Dialer 实现**:`l3` 接收已解析的 IP、端口、`appId` 和可选域名:
-  分配源端口 → per-conn auth 取 connectToken(失败退避重试,见 §6.1)→ 建立 TCPConn → 返回 `net.Conn`。
+  原子保留源端口/下行路由 → per-conn auth 取 connectToken(失败退避重试,见 §6.1)→
+  用固定 VIP:srcPort 建立 gVisor TCP 连接 → 返回 `net.Conn`。
 
 ---
 
@@ -200,7 +198,8 @@ docs/
 
 - 网关对**快速连接 churn** 会瞬时拒绝(无 SYN-ACK)。`Dial` 失败时**退避重试**(参考:最多 4 次,间隔 1.5s)。
 - **复用隧道**:一条隧道承载多条连接,避免频繁建立隧道;conntrack 按源端口复用管理。
-- 连接关闭时发送 FIN 并注销 conntrack,避免网关侧 conntrack 堆积。
+- 入口 EOF 先做 TCP 半关闭;完整关闭后由 gVisor 完成 FIN_WAIT_2/TIME_WAIT。下行路由保留
+  130 秒(两个默认 60 秒状态周期加余量),避免过早注销造成 FIN/ACK 丢弃和端口复用冲突。
 
 ### 6.2 保活与自愈
 
@@ -215,9 +214,10 @@ docs/
 
 ### 6.3 并发与资源
 
-- 每条入站连接一个 goroutine,通过共享隧道的多路复用(按源端口/conntrackHash 分发)转发。
-- 写隧道加锁串行化帧发送;读由单一 reader 线程分发到各 TCPConn。
-- 提供并发上限与空闲回收,防止资源泄漏。
+- 每条入站连接使用双向复制 goroutine,通过共享隧道和共享 gVisor stack 多路复用;
+  源端口同时索引下行连接和每连接 connectToken。
+- 写隧道加锁串行化帧发送;读由单一 reader 线程分发到 gVisor link endpoint。
+- 提供并发上限、半关闭超时、TIME_WAIT 路由回收和隧道销毁清理,防止资源泄漏。
 
 ---
 

@@ -21,6 +21,13 @@ type bufferedConn struct {
 // Read resolves the ambiguous promotion between bufio.Reader and net.Conn.
 func (b *bufferedConn) Read(p []byte) (int, error) { return b.Reader.Read(p) }
 
+func (b *bufferedConn) CloseWrite() error {
+	if writer, ok := b.Conn.(closeWriter); ok {
+		return writer.CloseWrite()
+	}
+	return b.Conn.Close()
+}
+
 // handleHTTPConnect serves one HTTP CONNECT client. Plain HTTP forwarding is
 // out of scope: this is a tunneling proxy.
 func (s *Server) handleHTTPConnect(ctx context.Context, client net.Conn) {

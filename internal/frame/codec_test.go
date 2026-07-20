@@ -55,6 +55,52 @@ func TestReadTunnelAuthReply(t *testing.T) {
 	if reply.VIP.String() != "10.19.240.43" {
 		t.Errorf("VIP = %s", reply.VIP)
 	}
+	if reply.AddrType != 1 || reply.IPv6 != nil {
+		t.Errorf("address assignment = type %d, IPv6 %v", reply.AddrType, reply.IPv6)
+	}
+}
+
+func TestReadTunnelAuthReplyDualStack(t *testing.T) {
+	authJSON := []byte(`{"code":0,"data":{"deviceID":"dual"}}`)
+	var stream bytes.Buffer
+	stream.Write([]byte{0x05, 0xD0, 0x53, 0x00})
+	stream.Write(binary.BigEndian.AppendUint16(nil, uint16(len(authJSON))))
+	stream.Write(authJSON)
+	stream.Write([]byte{
+		0x05, 0x00, 0x00, 0x05,
+		10, 19, 240, 43,
+		0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
+		0xff, 0xff,
+	})
+
+	reply, err := ReadTunnelAuthReply(bufio.NewReader(&stream))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reply.AddrType != 5 || reply.VIP.String() != "10.19.240.43" || reply.IPv6.String() != "2001:db8::1" {
+		t.Fatalf("dual-stack reply = type %d, IPv4 %s, IPv6 %s", reply.AddrType, reply.VIP, reply.IPv6)
+	}
+}
+
+func TestReadTunnelAuthReplyIPv6Only(t *testing.T) {
+	authJSON := []byte(`{"code":0,"data":{"deviceID":"v6"}}`)
+	var stream bytes.Buffer
+	stream.Write([]byte{0x05, 0xD0, 0x53, 0x00})
+	stream.Write(binary.BigEndian.AppendUint16(nil, uint16(len(authJSON))))
+	stream.Write(authJSON)
+	stream.Write([]byte{
+		0x05, 0x00, 0x00, 0x04,
+		0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2,
+		0xff, 0xff,
+	})
+
+	reply, err := ReadTunnelAuthReply(bufio.NewReader(&stream))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reply.AddrType != 4 || reply.VIP != nil || reply.IPv6.String() != "2001:db8::2" {
+		t.Fatalf("IPv6-only reply = type %d, IPv4 %v, IPv6 %s", reply.AddrType, reply.VIP, reply.IPv6)
+	}
 }
 
 func TestReadTunnelAuthReplyFailure(t *testing.T) {
@@ -71,6 +117,25 @@ func TestReadTunnelAuthReplyFailure(t *testing.T) {
 	}
 	if !authErr.ShouldSwitchLine() {
 		t.Errorf("code %d must trigger line switch", authErr.Code)
+	}
+}
+
+func TestReadTunnelAuthReplyRejectsUnexpectedFrameCommands(t *testing.T) {
+	authJSON := []byte(`{"code":0,"data":{"deviceID":"device"}}`)
+	validPrefix := []byte{0x05, 0xD0, 0x53, 0x00}
+	validPrefix = binary.BigEndian.AppendUint16(validPrefix, uint16(len(authJSON)))
+	validPrefix = append(validPrefix, authJSON...)
+
+	tests := map[string][]byte{
+		"s-frame": {0x05, 0xD0, 0x54, 0x00, 0x00, 0x00},
+		"VIP":     append(append([]byte(nil), validPrefix...), 0x05, 0x01, 0x00, 0x01),
+	}
+	for name, stream := range tests {
+		t.Run(name, func(t *testing.T) {
+			if _, err := ReadTunnelAuthReply(bufio.NewReader(bytes.NewReader(stream))); err == nil {
+				t.Fatal("unexpected frame command accepted")
+			}
+		})
 	}
 }
 
@@ -176,16 +241,19 @@ func TestSplitIPPackets(t *testing.T) {
 }
 
 func TestEncodeDataLayout(t *testing.T) {
-	pkt := fakeIP(28)
-	raw, err := EncodeData("abcd1234", pkt)
+	first := fakeIP(28)
+	second := fakeIP(40)
+	raw, err := EncodeData("abcd1234", first, second)
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := []byte{0x05, 0x14, 8}
 	want = append(want, "abcd1234"...)
-	want = append(want, 0x00, 0x00, 0x01)
-	want = binary.BigEndian.AppendUint16(want, uint16(len(pkt)))
-	want = append(want, pkt...)
+	want = append(want, 0x00, 0x00, 0x02)
+	want = binary.BigEndian.AppendUint16(want, uint16(len(first)))
+	want = append(want, first...)
+	want = binary.BigEndian.AppendUint16(want, uint16(len(second)))
+	want = append(want, second...)
 	if !bytes.Equal(raw, want) {
 		t.Errorf("EncodeData mismatch:\ngot  %x\nwant %x", raw, want)
 	}

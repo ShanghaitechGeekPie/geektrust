@@ -16,9 +16,14 @@ import (
 	"geektrust/internal/resolver"
 )
 
-// maxConcurrent caps per-listener connections so a runaway client cannot
-// exhaust goroutines or tunnel conntrack slots.
-const maxConcurrent = 256
+const (
+	// maxConcurrent caps per-listener connections so a runaway client cannot
+	// exhaust goroutines or tunnel conntrack slots.
+	maxConcurrent = 256
+	// A clean EOF half-closes the opposite write side. Bound the time allowed
+	// for the peer's remaining response/FIN so abandoned clients cannot leak.
+	halfCloseTimeout = 30 * time.Second
+)
 
 // Dialer establishes a TCP connection through the tunnel to an
 // already-resolved IP under the given authorizing app. Implemented by
@@ -155,14 +160,96 @@ func (s *Server) track(c net.Conn, add bool) {
 	s.mu.Unlock()
 }
 
-// relayPair copies both directions until the first side ends, then tears
-// the pair down.
-func relayPair(a, b io.ReadWriteCloser) {
-	done := make(chan struct{}, 2)
-	go func() { io.Copy(a, b); done <- struct{}{} }()
-	go func() { io.Copy(b, a); done <- struct{}{} }()
-	<-done
-	a.Close()
-	b.Close()
-	<-done
+var relayBuffers = sync.Pool{New: func() any {
+	buffer := make([]byte, 32*1024)
+	return &buffer
+}}
+
+type closeWriter interface {
+	CloseWrite() error
+}
+
+type activityReader struct {
+	io.Reader
+	activity chan<- struct{}
+}
+
+func (r activityReader) Read(p []byte) (int, error) {
+	n, err := r.Reader.Read(p)
+	if n > 0 {
+		select {
+		case r.activity <- struct{}{}:
+		default:
+		}
+	}
+	return n, err
+}
+
+// relayPair preserves TCP half-closes: EOF in one direction sends FIN but
+// leaves the reverse stream alive. Protocols that send a request through EOF
+// and then read a response therefore work through both inbound proxy types.
+func relayPair(a, b net.Conn) {
+	relayPairWithIdleTimeout(a, b, halfCloseTimeout)
+}
+
+func relayPairWithIdleTimeout(a, b net.Conn, idleTimeout time.Duration) {
+	done := make(chan error, 2)
+	activity := make(chan struct{}, 1)
+	copyStream := func(dst, src net.Conn) {
+		buffer := relayBuffers.Get().(*[]byte)
+		_, err := io.CopyBuffer(dst, activityReader{Reader: src, activity: activity}, *buffer)
+		relayBuffers.Put(buffer)
+		if err == nil {
+			if writer, ok := dst.(closeWriter); ok {
+				err = writer.CloseWrite()
+			} else {
+				err = dst.Close()
+			}
+		}
+		done <- err
+	}
+	go copyStream(a, b)
+	go copyStream(b, a)
+
+	firstErr := <-done
+	if firstErr != nil {
+		a.Close()
+		b.Close()
+		<-done
+		return
+	}
+	// Discard activity from before the first FIN. From this point onward the
+	// timeout measures idleness in the still-open reverse direction.
+drain:
+	for {
+		select {
+		case <-activity:
+		default:
+			break drain
+		}
+	}
+
+	timer := time.NewTimer(idleTimeout)
+	defer timer.Stop()
+	for {
+		select {
+		case <-done:
+			a.Close()
+			b.Close()
+			return
+		case <-activity:
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			timer.Reset(idleTimeout)
+		case <-timer.C:
+			a.Close()
+			b.Close()
+			<-done
+			return
+		}
+	}
 }

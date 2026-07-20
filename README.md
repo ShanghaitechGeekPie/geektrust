@@ -16,8 +16,10 @@ SOCKS5 / HTTP CONNECT 代理暴露给其他程序。协议规格见 [`docs/TECHN
   会话换取。
 - **隧道**:网关 441 端口 TLS 之上承载版本 `0x05` 的二进制帧;一次隧道认证取得
   虚拟 IP(VIP,仅用作数据包的源地址标记)。
-- **数据面**:每条 TCP 连接先做一次「每连接认证」取得 connectToken,随后在隧道内
-  以用户态 TCP 端点(三次握手、seq/ack、重组)重建,封装为 IPv4 包经数据帧转发。
+- **数据面**:每条 TCP 连接先做一次「每连接认证」取得 connectToken,再交给 gVisor
+  用户态 TCP/IP 栈处理重传、拥塞控制、流量控制、乱序重组、半关闭和 TIME_WAIT,
+  封装为 IPv4 包经数据帧转发。入口只看到标准 `net.Conn`,不区分 HTTP、TLS、
+  SSH、IMAP 等上层协议。
 - **保活**:心跳 20s,连续无响应判死,随后指数退避重连(1s→30s);多线路探测择优,
   隧道层错误码触发换线;会话失效时 passkey 静默重登。
 
@@ -112,8 +114,9 @@ DNS 默认直连 `223.5.5.5` 和 `119.29.29.29`,并过滤 fake-ip 假地址;
 
 ## 限制
 
-- 仅 TCP over IPv4。SOCKS5 UDP ASSOCIATE 与 IPv6 目标暂不支持(UDP 数据帧
-  格式未定;隧道 VIP 为 IPv4)。
+- 仅 TCP over IPv4。网关接入线路本身可以是 IPv6,但线上隧道认证分配的是
+  `addrType=1` IPv4 VIP;因此 IPv6 字面量和仅有 AAAA 的目标无法转发。域名有
+  IPv4 地址时正常使用。SOCKS5 UDP ASSOCIATE 也暂不支持(UDP 数据帧格式未定)。
 - 控制面走浏览器路径(clientType=SDPBrowserClient),不计算接口签名。
 
 ## 鸣谢
@@ -125,6 +128,8 @@ DNS 默认直连 `223.5.5.5` 和 `119.29.29.29`,并过滤 fake-ip 假地址;
   Go 移植(keystore 格式双向兼容),passkey 绑定仍由该项目完成。
 - [zju-connect](https://github.com/Mythologyli/zju-connect) — 浙江大学 aTrust
   客户端(Go),其隧道帧处理与线路择优实现是重要的对照参考。
+- [metacubex/gvisor](https://github.com/metacubex/gvisor) — gVisor 用户态网络栈的
+  Go module 发行版,负责完整 TCP 状态机、重传、拥塞控制和窗口管理。
 - [Xray-core](https://github.com/XTLS/Xray-core) — 代理协议实现的一般性参考。
 
 ## 许可与声明

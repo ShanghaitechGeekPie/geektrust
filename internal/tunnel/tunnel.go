@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"os"
@@ -24,6 +25,8 @@ import (
 const (
 	// HeartbeatInterval is the 0x15 send period.
 	HeartbeatInterval = 20 * time.Second
+	// heartbeatWriteTimeout detects a wedged serialized write path promptly.
+	heartbeatWriteTimeout = 3 * time.Second
 	// livenessLimit: no received frame for this long declares the tunnel
 	// dead (active keepalive: three missed heartbeat intervals).
 	livenessLimit = 3 * HeartbeatInterval
@@ -33,6 +36,8 @@ const (
 	authTimeout = 8 * time.Second
 	// connectTimeout covers TCP+TLS+tunnel auth.
 	connectTimeout = 15 * time.Second
+	// unknownLogInterval rate-limits stale/unsolicited packet diagnostics.
+	unknownLogInterval = 10 * time.Second
 
 	// firstSrcPort: the first allocated port is 30001. The gateway's
 	// address check rejects port 30000 with code 10000005.
@@ -44,7 +49,7 @@ const (
 var ErrTunnelDead = errors.New("tunnel dead")
 
 // PacketSink receives downlink IPv4 packets for one multiplexed connection.
-// Implemented by l3.TCPConn; the tunnel never imports l3 (no cycle).
+// The tunnel owns only this narrow delivery contract.
 type PacketSink interface {
 	DeliverPacket(pkt []byte)
 }
@@ -83,7 +88,6 @@ type Tunnel struct {
 	addr      string
 
 	authCounter atomic.Uint64
-	portMu      sync.Mutex
 	portNext    uint16
 
 	connsMu sync.Mutex
@@ -92,9 +96,11 @@ type Tunnel struct {
 	pendingMu sync.Mutex
 	pending   map[uint64]chan authResult
 
-	closeOnce sync.Once
-	dead      chan struct{}
-	lastRecv  atomic.Int64
+	closeOnce      sync.Once
+	dead           chan struct{}
+	lastRecv       atomic.Int64
+	unknownPackets atomic.Uint64
+	unknownLogAt   atomic.Int64
 }
 
 // Dial connects to addr, performs the one-shot tunnel authentication and
@@ -127,7 +133,10 @@ func Dial(ctx context.Context, addr, sid string, logger *slog.Logger) (*Tunnel, 
 	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
 		deadline = d
 	}
-	_ = conn.SetDeadline(deadline)
+	if err := conn.SetDeadline(deadline); err != nil {
+		raw.Close()
+		return nil, fmt.Errorf("tunnel auth deadline: %w", err)
+	}
 	authDone := make(chan struct{})
 	defer close(authDone)
 	go func() {
@@ -142,7 +151,11 @@ func Dial(ctx context.Context, addr, sid string, logger *slog.Logger) (*Tunnel, 
 		raw.Close()
 		return nil, err
 	}
-	if _, err := conn.Write(authFrames); err != nil {
+	n, err := conn.Write(authFrames)
+	if err == nil && n != len(authFrames) {
+		err = io.ErrShortWrite
+	}
+	if err != nil {
 		raw.Close()
 		return nil, fmt.Errorf("tunnel auth write: %w", err)
 	}
@@ -153,7 +166,14 @@ func Dial(ctx context.Context, addr, sid string, logger *slog.Logger) (*Tunnel, 
 		raw.Close()
 		return nil, err
 	}
-	_ = conn.SetDeadline(time.Time{})
+	if reply.VIP.To4() == nil {
+		raw.Close()
+		return nil, errors.New("tunnel assigned an IPv6-only VIP; this gateway data plane requires IPv4")
+	}
+	if err := conn.SetDeadline(time.Time{}); err != nil {
+		raw.Close()
+		return nil, fmt.Errorf("clear tunnel auth deadline: %w", err)
+	}
 
 	t := &Tunnel{
 		conn:      conn,
@@ -172,7 +192,11 @@ func Dial(ctx context.Context, addr, sid string, logger *slog.Logger) (*Tunnel, 
 	t.lastRecv.Store(time.Now().UnixNano())
 	go t.readLoop()
 	go t.keepAlive()
-	logger.Info("tunnel established", "addr", addr, "vip", reply.VIP.String(), "tunnel_device", reply.DeviceID)
+	logArgs := []any{"addr", addr, "vip", reply.VIP.String(), "addr_type", reply.AddrType, "tunnel_device", reply.DeviceID}
+	if reply.IPv6 != nil {
+		logArgs = append(logArgs, "ipv6", reply.IPv6.String())
+	}
+	logger.Info("tunnel established", logArgs...)
 	return t, nil
 }
 
@@ -233,38 +257,29 @@ func (t *Tunnel) markDead() {
 // to match auth requests with responses under concurrency).
 func (t *Tunnel) NextAuthID() uint64 { return t.authCounter.Add(1) }
 
-// AllocSrcPort assigns an unused virtual source port. Downlink packets are
-// routed back by this port, so it must be unique among live connections.
-func (t *Tunnel) AllocSrcPort() (uint16, error) {
-	t.portMu.Lock()
-	defer t.portMu.Unlock()
+// ReserveConn atomically allocates a virtual source port and installs its
+// downlink sink. Reserving and registering under one lock prevents concurrent
+// dials from receiving the same source port before either can register.
+func (t *Tunnel) ReserveConn(sink PacketSink) (uint16, error) {
 	t.connsMu.Lock()
 	defer t.connsMu.Unlock()
 	for range lastSrcPort - firstSrcPort + 1 {
 		port := t.portNext
-		// Advance with wrap BEFORE uint16 overflow would make the
-		// comparison below unreachable.
+		// Advance with wrap before uint16 overflow.
 		if t.portNext == lastSrcPort {
 			t.portNext = firstSrcPort
 		} else {
 			t.portNext++
 		}
 		if _, used := t.conns[port]; !used {
+			t.conns[port] = sink
 			return port, nil
 		}
 	}
 	return 0, errors.New("no free virtual source port")
 }
 
-// RegisterConn routes downlink packets for srcPort to sink. Must be called
-// before the handshake so the SYN-ACK can be routed.
-func (t *Tunnel) RegisterConn(srcPort uint16, sink PacketSink) {
-	t.connsMu.Lock()
-	t.conns[srcPort] = sink
-	t.connsMu.Unlock()
-}
-
-// UnregisterConn stops routing for srcPort (sends FIN first, see l3).
+// UnregisterConn releases the downlink route for srcPort.
 func (t *Tunnel) UnregisterConn(srcPort uint16) {
 	t.connsMu.Lock()
 	delete(t.conns, srcPort)
@@ -288,11 +303,15 @@ func (t *Tunnel) RequestAuth(ctx context.Context, authID uint64, body []byte) (*
 	if err != nil {
 		return nil, err
 	}
-	if err := t.WriteFrame(authFrame, time.Time{}); err != nil {
+	authDeadline := time.Now().Add(authTimeout)
+	if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(authDeadline) {
+		authDeadline = ctxDeadline
+	}
+	if err := t.writeFrame(ctx, authFrame, authDeadline); err != nil {
 		return nil, err
 	}
 
-	timer := time.NewTimer(authTimeout)
+	timer := time.NewTimer(time.Until(authDeadline))
 	defer timer.Stop()
 	select {
 	case r := <-ch:
@@ -306,10 +325,12 @@ func (t *Tunnel) RequestAuth(ctx context.Context, authID uint64, body []byte) (*
 	}
 }
 
-// SendData sends one full IPv4 packet in an uplink 0x14 data frame.
-// deadline bounds the serialized socket write (zero = global timeout only).
-func (t *Tunnel) SendData(token string, pkt []byte, deadline time.Time) error {
-	fr, err := frame.EncodeData(token, pkt)
+// SendData sends one or more full IPv4 packets in an uplink 0x14 data frame.
+// Grouping packets amortizes framing, TLS, and socket-write overhead. deadline
+// bounds connection setup writes; established TCP traffic uses the global
+// tunnel write timeout.
+func (t *Tunnel) SendData(token string, deadline time.Time, packets ...[]byte) error {
+	fr, err := frame.EncodeData(token, packets...)
 	if err != nil {
 		return err
 	}
@@ -326,10 +347,17 @@ const writeTimeout = 30 * time.Second
 // stalled socket cannot wedge the lock. Any write error kills the tunnel:
 // a partial frame would desynchronize the multiplexed stream.
 func (t *Tunnel) WriteFrame(data []byte, deadline time.Time) error {
-	if err := t.acquireWrite(deadline); err != nil {
+	return t.writeFrame(context.Background(), data, deadline)
+}
+
+func (t *Tunnel) writeFrame(ctx context.Context, data []byte, deadline time.Time) error {
+	if err := t.acquireWrite(ctx, deadline); err != nil {
 		return err
 	}
 	defer func() { <-t.writeGate }()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if !t.Alive() {
 		return ErrTunnelDead
 	}
@@ -342,9 +370,18 @@ func (t *Tunnel) WriteFrame(data []byte, deadline time.Time) error {
 			return os.ErrDeadlineExceeded
 		}
 	}
-	_ = t.conn.SetWriteDeadline(eff)
-	_, err := t.conn.Write(data)
-	_ = t.conn.SetWriteDeadline(time.Time{})
+	if err := t.conn.SetWriteDeadline(eff); err != nil {
+		t.markDead()
+		return err
+	}
+	n, err := t.conn.Write(data)
+	if err == nil && n != len(data) {
+		err = io.ErrShortWrite
+	}
+	clearErr := t.conn.SetWriteDeadline(time.Time{})
+	if err == nil {
+		err = clearErr
+	}
 	if err != nil {
 		t.markDead()
 		if perCall && !time.Now().Before(deadline) {
@@ -355,11 +392,13 @@ func (t *Tunnel) WriteFrame(data []byte, deadline time.Time) error {
 	return nil
 }
 
-func (t *Tunnel) acquireWrite(deadline time.Time) error {
+func (t *Tunnel) acquireWrite(ctx context.Context, deadline time.Time) error {
 	if deadline.IsZero() {
 		select {
 		case t.writeGate <- struct{}{}:
 			return nil
+		case <-ctx.Done():
+			return ctx.Err()
 		case <-t.dead:
 			return ErrTunnelDead
 		}
@@ -373,6 +412,8 @@ func (t *Tunnel) acquireWrite(deadline time.Time) error {
 	select {
 	case t.writeGate <- struct{}{}:
 		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	case <-timer.C:
 		return os.ErrDeadlineExceeded
 	case <-t.dead:
@@ -456,7 +497,7 @@ func (t *Tunnel) dispatch(pkt []byte) {
 		return
 	}
 	ihl := int(pkt[0]&0x0F) * 4
-	if len(pkt) < ihl+4 {
+	if ihl < 20 || len(pkt) < ihl+4 {
 		return
 	}
 	dport := binary.BigEndian.Uint16(pkt[ihl+2 : ihl+4])
@@ -464,10 +505,23 @@ func (t *Tunnel) dispatch(pkt []byte) {
 	sink := t.conns[dport]
 	t.connsMu.Unlock()
 	if sink == nil {
-		t.logger.Debug("tunnel: packet for unknown port, dropping", "port", dport)
+		if dport >= firstSrcPort {
+			t.logUnknownPacket(dport)
+		}
 		return
 	}
 	sink.DeliverPacket(pkt)
+}
+
+func (t *Tunnel) logUnknownPacket(port uint16) {
+	t.unknownPackets.Add(1)
+	now := time.Now().UnixNano()
+	last := t.unknownLogAt.Load()
+	if now-last < int64(unknownLogInterval) || !t.unknownLogAt.CompareAndSwap(last, now) {
+		return
+	}
+	t.logger.Debug("tunnel: packets for unknown ports dropped",
+		"latest_port", port, "count", t.unknownPackets.Swap(0))
 }
 
 // keepAlive sends heartbeats and declares death on sustained silence.
@@ -479,7 +533,7 @@ func (t *Tunnel) keepAlive() {
 	for {
 		select {
 		case <-beat.C:
-			if err := t.WriteFrame(frame.Heartbeat, time.Time{}); err != nil {
+			if err := t.WriteFrame(frame.Heartbeat, time.Now().Add(heartbeatWriteTimeout)); err != nil {
 				t.logger.Debug("tunnel heartbeat send failed", "addr", t.addr, "err", err)
 				t.markDead()
 				return

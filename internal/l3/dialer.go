@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"sync"
 	"time"
 
 	"geektrust/internal/session"
@@ -28,6 +29,9 @@ type Dialer struct {
 	Manager  *tunnel.Manager
 	Provider session.CredentialProvider
 	Logger   *slog.Logger
+
+	stackMu sync.Mutex
+	stacks  map[*tunnel.Tunnel]*tcpStack
 }
 
 // Dial connects to an already-resolved tunnel IP:port (domain resolution
@@ -94,6 +98,32 @@ func (e *AuthRejectedError) Error() string {
 	return fmt.Sprintf("per-conn auth rejected: code %d: %s", e.Code, e.Message)
 }
 
+func (d *Dialer) stackFor(tun *tunnel.Tunnel) (*tcpStack, error) {
+	d.stackMu.Lock()
+	defer d.stackMu.Unlock()
+	if current := d.stacks[tun]; current != nil {
+		return current, nil
+	}
+	transport, err := newTCPStack(tun, d.Logger)
+	if err != nil {
+		return nil, err
+	}
+	if d.stacks == nil {
+		d.stacks = make(map[*tunnel.Tunnel]*tcpStack)
+	}
+	d.stacks[tun] = transport
+	go func() {
+		<-tun.Dead()
+		transport.destroy()
+		d.stackMu.Lock()
+		if d.stacks[tun] == transport {
+			delete(d.stacks, tun)
+		}
+		d.stackMu.Unlock()
+	}()
+	return transport, nil
+}
+
 func (d *Dialer) dialOnce(ctx context.Context, ip string, port int, appID, domain string) (net.Conn, error) {
 	tun, err := d.Manager.Tunnel(ctx)
 	if err != nil {
@@ -106,32 +136,33 @@ func (d *Dialer) dialOnce(ctx context.Context, ip string, port int, appID, domai
 	if appID == "" {
 		appID = cred.Policy.AppIDFor(net.ParseIP(ip).To4(), port, cred.AppID)
 	}
-
-	srcPort, err := tun.AllocSrcPort()
+	transport, err := d.stackFor(tun)
 	if err != nil {
 		return nil, err
 	}
+	srcPort, err := tun.ReserveConn(transport.endpoint)
+	if err != nil {
+		return nil, err
+	}
+	if !transport.endpoint.addRoute(srcPort) {
+		tun.UnregisterConn(srcPort)
+		return nil, tunnel.ErrTunnelDead
+	}
+	release := func() { transport.release(srcPort) }
+
 	authID := tun.NextAuthID()
 	body, err := buildAuthRequestIP(cred.SID, appID, cred.DeviceID, ip, port, tun.VIP(), srcPort, authID, domain)
 	if err != nil {
+		release()
 		return nil, err
 	}
-
-	// Register before auth so the reader can route the very first packets.
-	conn := newTCPConn(tun, "", tun.VIP(), net.ParseIP(ip).To4(), srcPort, uint16(port))
-	tun.RegisterConn(srcPort, conn)
-	cleanup := func() {
-		tun.UnregisterConn(srcPort)
-		conn.Close()
-	}
-
 	resp, err := tun.RequestAuth(ctx, authID, body)
 	if err != nil {
-		cleanup()
+		release()
 		return nil, fmt.Errorf("per-conn auth: %w", err)
 	}
 	if resp.Code != 0 {
-		cleanup()
+		release()
 		rej := &AuthRejectedError{Code: resp.Code, Message: resp.Message, SwitchLine: resp.ShouldSwitchLine()}
 		if rej.SwitchLine {
 			d.Logger.Warn("per-conn auth requests line switch",
@@ -141,14 +172,34 @@ func (d *Dialer) dialOnce(ctx context.Context, ip string, port int, appID, domai
 		return nil, rej
 	}
 	if resp.ConnectToken == "" {
-		cleanup()
+		release()
 		return nil, errors.New("per-conn auth returned no connectToken")
 	}
-	conn.token = resp.ConnectToken
+	handshakeDeadline := time.Now().Add(tcpHandshakeTimeout)
+	if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(handshakeDeadline) {
+		handshakeDeadline = ctxDeadline
+	}
+	if !transport.endpoint.updateRoute(srcPort, dataRoute{
+		token: resp.ConnectToken, deadline: handshakeDeadline,
+	}) {
+		release()
+		return nil, tunnel.ErrTunnelDead
+	}
 
-	if err := conn.handshake(ctx); err != nil {
-		cleanup()
+	conn, err := transport.dial(ctx, net.ParseIP(ip).To4(), srcPort, uint16(port), handshakeDeadline)
+	if err != nil {
+		// Expire the route immediately: the asynchronous FIFO may still contain
+		// a SYN/RST, which must be dropped rather than sent after retry.
+		transport.endpoint.updateRoute(srcPort, dataRoute{
+			token: resp.ConnectToken, deadline: time.Now().Add(-time.Second),
+		})
+		transport.releaseLater(srcPort)
 		return nil, err
 	}
-	return conn, nil
+	routeAlive := transport.endpoint.updateRoute(srcPort, dataRoute{token: resp.ConnectToken})
+	if !routeAlive {
+		conn.Close()
+		return nil, tunnel.ErrTunnelDead
+	}
+	return &managedTCPConn{TCPConn: conn, stack: transport, port: srcPort}, nil
 }

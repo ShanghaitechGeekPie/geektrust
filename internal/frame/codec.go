@@ -261,6 +261,10 @@ type TunnelAuthReply struct {
 	DeviceID string
 	// VIP is the assigned virtual IPv4 address used as uplink source.
 	VIP net.IP
+	// IPv6 is populated only for a dual-stack or IPv6-only assignment.
+	IPv6 net.IP
+	// AddrType is the gateway's VIP address-family marker.
+	AddrType byte
 }
 
 // TunnelAuthError is a non-zero tunnel authentication code. Codes
@@ -299,8 +303,8 @@ func ReadTunnelAuthReply(r *bufio.Reader) (*TunnelAuthReply, error) {
 	if err != nil {
 		return nil, err
 	}
-	if sHead[0] != CmdSFrame {
-		return nil, fmt.Errorf("tunnel auth: expected S-frame, got 0x%02x", sHead[0])
+	if sHead[0] != CmdSFrame || sHead[1] != 0 {
+		return nil, fmt.Errorf("tunnel auth: expected S-frame, got 0x%02x 0x%02x", sHead[0], sHead[1])
 	}
 	payload, err := readFull(r, int(binary.BigEndian.Uint16(sHead[2:4])))
 	if err != nil {
@@ -324,8 +328,8 @@ func ReadTunnelAuthReply(r *bufio.Reader) (*TunnelAuthReply, error) {
 	if err != nil {
 		return nil, err
 	}
-	if vipHead[0] != Version {
-		return nil, fmt.Errorf("tunnel auth: expected VIP frame, got 0x%02x", vipHead[0])
+	if vipHead[0] != Version || vipHead[1] != 0 {
+		return nil, fmt.Errorf("tunnel auth: expected VIP frame, got 0x%02x 0x%02x", vipHead[0], vipHead[1])
 	}
 	addrLen, err := vipAddrLen(vipHead[3])
 	if err != nil {
@@ -335,20 +339,30 @@ func ReadTunnelAuthReply(r *bufio.Reader) (*TunnelAuthReply, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &TunnelAuthReply{
+	reply := &TunnelAuthReply{
 		DeviceID: resp.Data.DeviceID,
-		VIP:      net.IPv4(addr[0], addr[1], addr[2], addr[3]).To4(),
-	}, nil
+		AddrType: vipHead[3],
+	}
+	switch vipHead[3] {
+	case 1:
+		reply.VIP = net.IPv4(addr[0], addr[1], addr[2], addr[3]).To4()
+	case 4:
+		reply.IPv6 = append(net.IP(nil), addr[:16]...)
+	case 5:
+		reply.VIP = net.IPv4(addr[0], addr[1], addr[2], addr[3]).To4()
+		reply.IPv6 = append(net.IP(nil), addr[4:20]...)
+	}
+	return reply, nil
 }
 
 func vipAddrLen(addrType byte) (int, error) {
 	switch addrType {
-	case 1: // IPv4: 4 addr + 2 mask
+	case 1: // IPv4(4) + 2 metadata bytes
 		return 6, nil
-	case 5: // dual stack: IPv4(6) + IPv6(16); the leading IPv4 is used
+	case 5: // IPv4(4) + IPv6(16) + 2 metadata bytes
 		return 22, nil
-	case 4: // IPv6-only: this data plane is IPv4-only (ip.atype 2048)
-		return 0, fmt.Errorf("tunnel auth: IPv6-only VIP assignment is not supported")
+	case 4: // IPv6(16) + 2 metadata bytes
+		return 18, nil
 	default:
 		return 0, fmt.Errorf("tunnel auth: unknown VIP addrType %d", addrType)
 	}
