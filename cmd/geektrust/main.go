@@ -31,7 +31,7 @@ func main() {
 	var configPath string
 	flag.StringVar(&configPath, "config", "config.toml", "path to the TOML config file")
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: geektrust [-config config.toml] <command>\n\nCommands:\n  run               ensure a session, then start the SOCKS5/HTTP proxies (default)\n  login             establish a VPN session (passkey; SMS when required)\n  dial <host[:port]>  connect through the tunnel (TLS handshake on :443)\n")
+		fmt.Fprintf(os.Stderr, "Usage: geektrust [-config config.toml] <command>\n\nCommands:\n  run               ensure a session, then start the SOCKS5/HTTP proxies (default)\n  login             establish a VPN session (passkey; SMS when required)\n  dial <host[:port]>  connect through the tunnel (TLS handshake on :443)\n  trust-device <sub>  manage trusted terminals (list | bind | unbind <id> | logout <id>)\n")
 		flag.PrintDefaults()
 	}
 	flag.Parse()
@@ -59,6 +59,8 @@ func main() {
 		err = cmdRun(ctx, cfg, logger, args)
 	case "dial":
 		err = cmdDial(ctx, cfg, logger, args)
+	case "trust-device":
+		err = cmdTrustDevice(ctx, cfg, logger, args)
 	default:
 		flag.Usage()
 		os.Exit(2)
@@ -228,6 +230,76 @@ func cmdDial(ctx context.Context, cfg *config.Config, logger *slog.Logger, args 
 		}
 		fmt.Printf("tls handshake ok: %s, cipher 0x%04x, subject %s\n",
 			tls.VersionName(state.Version), state.CipherSuite, name)
+	}
+	return nil
+}
+
+// cmdTrustDevice manages trusted terminals: list, bind (mark this device as
+// trusted), unbind (remove a device by ID), or logout (logout a device by ID).
+// Requires an active session — run `geektrust login` first if needed.
+func cmdTrustDevice(ctx context.Context, cfg *config.Config, logger *slog.Logger, args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("trust-device requires a subcommand: list | bind | unbind <id> | logout <id>")
+	}
+
+	provider := session.NewProvider(cfg, logger, smsPrompt)
+	if _, err := provider.Credential(ctx); err != nil {
+		return fmt.Errorf("trust-device: need an active session: %w", err)
+	}
+	sc := provider.SDPCClient()
+	if sc == nil {
+		return fmt.Errorf("trust-device: no controller client available")
+	}
+
+	sub := args[0]
+	switch sub {
+	case "list":
+		list, err := sc.QueryTrustDevice(ctx)
+		if err != nil {
+			return fmt.Errorf("query trust device: %w", err)
+		}
+		fmt.Printf("trusted terminals (%d/%d):\n", list.CurrentCount, list.MaxCount)
+		if list.DeviceTrusted {
+			fmt.Println("  current device: trusted")
+		} else {
+			fmt.Println("  current device: NOT trusted")
+		}
+		for _, d := range list.Devices {
+			marker := ""
+			if d.Current {
+				marker = " (current)"
+			}
+			fmt.Printf("  %s  %s  platform=%s  trustTime=%s  lastLogin=%s%s\n",
+				d.ID, d.DeviceName, d.Platform, d.TrustTime, d.LastLogin, marker)
+		}
+
+	case "bind":
+		if err := sc.TrustDevice(ctx); err != nil {
+			return fmt.Errorf("bind trust device: %w", err)
+		}
+		fmt.Println("device bound as trusted terminal")
+		fmt.Println("subsequent logins with the same device_id may skip SMS verification")
+
+	case "unbind":
+		if len(args) < 2 {
+			return fmt.Errorf("unbind requires a device ID")
+		}
+		if err := sc.UntrustDevice(ctx, args[1:]); err != nil {
+			return fmt.Errorf("unbind trust device: %w", err)
+		}
+		fmt.Printf("untrusted device(s): %s\n", strings.Join(args[1:], ", "))
+
+	case "logout":
+		if len(args) < 2 {
+			return fmt.Errorf("logout requires a device ID")
+		}
+		if err := sc.LogoutDevice(ctx, args[1]); err != nil {
+			return fmt.Errorf("logout trust device: %w", err)
+		}
+		fmt.Printf("logged out device: %s\n", args[1])
+
+	default:
+		return fmt.Errorf("unknown subcommand %q: use list | bind | unbind <id> | logout <id>", sub)
 	}
 	return nil
 }

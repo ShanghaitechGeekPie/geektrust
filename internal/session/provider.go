@@ -84,6 +84,15 @@ func NewProvider(cfg *config.Config, logger *slog.Logger, prompt SMSPrompter) *P
 	}
 }
 
+// SDPCClient returns the controller client from the last successful login,
+// or nil if no session has been established. Callers must not cache it: a
+// re-login may replace it at any time.
+func (p *Provider) SDPCClient() *sdpc.Client {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.sdpc
+}
+
 // Credential returns current valid credentials. Concurrent callers share one
 // in-flight restore/login.
 func (p *Provider) Credential(ctx context.Context) (*Credential, error) {
@@ -301,7 +310,7 @@ func (p *Provider) login(ctx context.Context) (*Credential, error) {
 	if needSMS {
 		sidTicket, err = p.smsFlow(ctx, sc)
 	} else {
-		p.logger.Info("controller did not request SMS")
+		p.logger.Info("controller did not request SMS; device is already trusted")
 		sidTicket, err = sc.TicketExchange(ctx)
 	}
 	if err != nil {
@@ -324,7 +333,8 @@ func (p *Provider) login(ctx context.Context) (*Credential, error) {
 	return p.finishLogin(ctx, sc, nil)
 }
 
-// smsFlow completes controller-requested SMS verification.
+// smsFlow completes controller-requested SMS verification, then binds this
+// device as a trusted terminal so that subsequent logins may skip SMS.
 func (p *Provider) smsFlow(ctx context.Context, sc *sdpc.Client) (string, error) {
 	if p.prompt == nil {
 		return "", errors.New("the controller requires SMS verification, but no prompt is available")
@@ -346,6 +356,16 @@ func (p *Provider) smsFlow(ctx context.Context, sc *sdpc.Client) (string, error)
 	if err != nil {
 		return "", fmt.Errorf("check sms code: %w", err)
 	}
+
+	// Bind this device as a trusted terminal so future logins from the
+	// same device_id may skip SMS. The server identifies the device by
+	// the session cookies and the device_id from reportEnv.
+	if err := sc.TrustDevice(ctx); err != nil {
+		p.logger.Warn("trust device binding failed; SMS will be required on next full login", "err", err)
+	} else {
+		p.logger.Info("device bound as trusted terminal")
+	}
+
 	return ticket, nil
 }
 
