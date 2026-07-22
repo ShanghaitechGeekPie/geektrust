@@ -249,7 +249,7 @@ func (p *Provider) restore(ctx context.Context) (*Credential, error) {
 
 	jar, _ := cookiejar.New(nil)
 	hc := &http.Client{Jar: jar, Timeout: 30 * time.Second}
-	sc := sdpc.NewClient(p.cfg.BaseURL, p.cfg.Platform, p.cfg.DeviceID, hc)
+	sc := p.newSDPC(hc)
 	cookies := make([]*http.Cookie, 0, len(st.Cookies))
 	for _, rec := range st.Cookies {
 		cookies = append(cookies, &http.Cookie{Name: rec.Name, Value: rec.Value})
@@ -272,6 +272,18 @@ func (p *Provider) restore(ctx context.Context) (*Credential, error) {
 	return cred, nil
 }
 
+// newSDPC builds a controller client honoring the configured login path
+// (client_type): "browser" keeps the unsigned browser path; "client" uses
+// the desktop path (clientType=SDPClient), which marks the session as client
+// mode and unlocks trusted-terminal management.
+func (p *Provider) newSDPC(hc *http.Client) *sdpc.Client {
+	sc := sdpc.NewClient(p.cfg.BaseURL, p.cfg.Platform, p.cfg.DeviceID, hc)
+	if p.cfg.ClientType == "client" {
+		sc.ClientType = sdpc.ClientTypeDesktop
+	}
+	return sc
+}
+
 // login runs the full sequence: IDS passkey → CAS → reportEnv → authCheck
 // (→ SMS when requested) → session exchange → clientResource.
 func (p *Provider) login(ctx context.Context) (*Credential, error) {
@@ -289,7 +301,7 @@ func (p *Provider) login(ctx context.Context) (*Credential, error) {
 	}
 	p.logger.Info("IDS passkey login ok")
 
-	sc := sdpc.NewClient(p.cfg.BaseURL, p.cfg.Platform, p.cfg.DeviceID, hc)
+	sc := p.newSDPC(hc)
 	ac, err := sc.AuthConfig(ctx)
 	if err != nil {
 		return nil, err
@@ -330,11 +342,21 @@ func (p *Provider) login(ctx context.Context) (*Credential, error) {
 		return nil, errors.New("onlineInfo reports offline after session exchange")
 	}
 	p.logger.Info("session established", "user", info.Username, "display_name", info.DisplayName)
+
+	// On the desktop path the session is in client mode: bind this device
+	// as a trusted terminal so subsequent full logins may skip SMS. The
+	// browser path cannot bind (server rejects with 75500000).
+	if needSMS && sc.ClientType == sdpc.ClientTypeDesktop {
+		if err := sc.TrustDevice(ctx); err != nil {
+			p.logger.Warn("trust device binding failed; SMS will be required on next full login", "err", err)
+		} else {
+			p.logger.Info("device bound as trusted terminal")
+		}
+	}
 	return p.finishLogin(ctx, sc, nil)
 }
 
-// smsFlow completes controller-requested SMS verification, then binds this
-// device as a trusted terminal so that subsequent logins may skip SMS.
+// smsFlow completes controller-requested SMS verification.
 func (p *Provider) smsFlow(ctx context.Context, sc *sdpc.Client) (string, error) {
 	if p.prompt == nil {
 		return "", errors.New("the controller requires SMS verification, but no prompt is available")
@@ -356,16 +378,6 @@ func (p *Provider) smsFlow(ctx context.Context, sc *sdpc.Client) (string, error)
 	if err != nil {
 		return "", fmt.Errorf("check sms code: %w", err)
 	}
-
-	// Bind this device as a trusted terminal so future logins from the
-	// same device_id may skip SMS. The server identifies the device by
-	// the session cookies and the device_id from reportEnv.
-	if err := sc.TrustDevice(ctx); err != nil {
-		p.logger.Warn("trust device binding failed; SMS will be required on next full login", "err", err)
-	} else {
-		p.logger.Info("device bound as trusted terminal")
-	}
-
 	return ticket, nil
 }
 

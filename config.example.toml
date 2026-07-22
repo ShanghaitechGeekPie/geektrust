@@ -14,6 +14,11 @@ device_id = "84B5B45FE73EC0036C3E97717308447F"
 base_url = "https://vpn.shanghaitech.edu.cn"
 platform = "Mac"            # 大小写敏感,必须为 Mac
 
+# 登录路径:browser(默认,纯 web 会话)或 client(客户端模式)。
+# client 模式下 reportEnv 以 clientType=SDPClient 上报,短信验证成功后会
+# 自动把本机绑定为授信终端,之后同一 device_id 的完整登录免短信。
+# client_type = "client"
+
 # clientResource 没有匹配的精确域名、IP 或后缀规则时使用的兜底 appId。
 app_id = "681165d0-1c77-11ed-8650-cd35a51aa42a"
 

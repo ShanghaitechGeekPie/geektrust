@@ -135,9 +135,12 @@ docs/
 - **稳定设备标识**:`device_id` 持久化且不应更改。更换它会被服务器视为新设备,再次触发短信。
 - **会话持久化与静默重登**:会话凭据(cookies/sid/device_id/网关线路)加密持久化,重启直接复用;
   会话失效时先尝试 passkey 静默重登。
+- **授信终端(client 模式)**:`client_type = "client"` 时 reportEnv 以 `clientType=SDPClient` 上报,
+  会话成为「客户端模式」;短信验证成功后会话建立时自动调用 `POST /passport/v1/security/trustDevice`
+  绑定授信终端。之后同一 `device_id` 的完整登录 `authCheck` 不再要求短信(已实测:
+  删除状态文件重新登录仍免短信)。browser 模式为纯 web 会话,服务器拒绝绑定(75500000)。
 
-服务端是否再次要求短信并不完全由 `device_id` 决定。实测中,会话彻底失效后走完整登录流程时,
-服务端可能再次返回 `nextService=auth/sms`。此时 CLI 会提示输入验证码。保持会话存活和复用
+browser 模式下服务端是否再次要求短信并不完全由 `device_id` 决定;保持会话存活和复用
 持久化状态可以减少短信次数,但不能保证首次验证后永久免短信。
 
 ### 4.3 Go 移植 ids-passkey 登录(仅登录)

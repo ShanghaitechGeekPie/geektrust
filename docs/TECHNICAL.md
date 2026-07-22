@@ -255,6 +255,39 @@ x-csrf-token: <csrfToken>
 响应:`{"code":0,"data":{"isOnline":true,"username":"...","displayName":"...",...}}`。
 会话失效时返回 `75500002`(会话无效/未登录)。
 
+### 3.9 授信终端(免短信二次认证)
+
+服务器按「授信终端」记录决定是否要求短信二次验证。绑定一次后,同一 `device_id` 的
+后续完整登录 `authCheck` 不再返回 `auth/sms`,直接走 `ticketExchange`(已实测:
+绑定后全新 state 登录免短信,资源策略完整拉取)。
+
+**前置条件:会话必须是「客户端模式」。** 判定依据是 `reportEnv` 的 `clientType` 查询参数:
+
+- `clientType=SDPBrowserClient`(geekTrust 默认)→ 纯 web 会话;此时调用绑定接口返回
+  `75500000 当前未安装客户端或使用纯web模式登录,无法添加授信终端`。
+- `clientType=SDPClient`(仅 reportEnv 此参数,其余接口仍用浏览器参数,均无需签名)
+  → 客户端模式会话,可绑定。geekTrust 以 `client_type = "client"` 启用。
+
+**接口**(均在浏览器参数 + 会话 cookie 下调用,无需 `X-Request-Sig`):
+
+```
+POST /passport/v1/security/trustDevice?clientType=SDPBrowserClient&platform=Mac&lang=zh-CN
+Content-Type: application/json;charset=UTF-8
+{}                                   # 空 body;服务器按会话 cookie + reportEnv 的 device_id 识别设备
+
+GET  /passport/v1/security/queryDevice?status=trust&clientType=…&platform=Mac&lang=zh-CN
+GET  /passport/v1/security/queryDevice?status=untrust&clientType=…&platform=Mac&lang=zh-CN
+POST /passport/v1/security/untrustDevice      {"idList":["<id>",...]}
+POST /passport/v1/security/logoutDevice       {"id":"<id>"}
+```
+
+- `queryDevice` 的 `status` 查询参数**必需**,缺失返回 HTTP 422 `10000001 invalid_param in query`。
+- `status=trust` 响应 `data`:`{data:[...], selfId, currentTrustStatus, trustDeviceConfig:{enable}}`;
+  设备条目字段:`id`、`deviceName`、`deviceType`(`browser`/桌面平台)、`os`、`osVersion`、
+  `lastLoginIp`、`lastLoginAddress`、`networkZoneList`、`onlineStatus`(bool)。
+  `selfId` 为当前会话设备 id,可据此判断本机是否已授信。
+- 绑定在短信验证成功、会话建立(onlineInfo 在线)之后调用;geekTrust 在 client 模式登录时自动执行。
+
 ---
 
 ## 4. 资源配置拉取
@@ -687,14 +720,21 @@ encryptedChallenge = UPPER_HEX( AES-CBC-128-PKCS7( challenge_b64 字符串, key,
 ### 10.3 X-Request-Sig(桌面路径接口签名)
 
 ```
-X-Request-Sig = LOWER_HEX( HMAC-SHA256( hex_decode(signKey), pathWithQuery + body ) )
+X-Request-Sig = UPPER_HEX( HMAC-SHA256( hex_decode(signKey), pathWithQuery + body ) )
 ```
 
-- `pathWithQuery` = 路径 + `?` + 查询串(如 `/controller/v1/user/clientResource?platform=Mac&clientType=SDPClient`)。
-- `body` = 实际发送的紧凑 JSON 字节。
-- HMAC 密钥为 `signKey` 的十六进制解码字节(32 字节);输出为 64 位**小写**十六进制(服务器大小写不敏感比对)。
-- 仅 `clientType=SDPClient` + 特定 body 字段的受信请求需要;浏览器路径无需。
-- 注:本仓库 Python 参考实现走浏览器路径,未实现此签名;上式为桌面路径参考。
+- 已由官方客户端二进制反汇编确认(`libSdpPcMITMAdapter.dylib` 的
+  `AntiMITMSignatureAlgo` → `HmacEncode`:EVP_sha256 + HMAC_Init/Update/Final,
+  再以 ostream `uppercase|hex, setw(2), fill '0'` 格式化每字节 → 64 位**大写**十六进制)。
+- `pathWithQuery` 为实际发送的请求目标;服务器按自身规范化形式重算,
+  因此 wire 格式必须与官方客户端**逐字节一致**:
+  `?platform=Mac&clientType=SDPClient`(platform 在前,**无 lang**)、body 字段序与官方一致。
+  多出的 `lang` 参数或不同的字段序都会导致 `10000008 interface sig verify failed`。
+- HMAC 密钥为 `signKey` 的十六进制解码字节(32 字节)。
+- signKey 由 `authConfig.antiMITMAttackData.challenge` 推导(§10.1);
+  登录前 challenge 推导的 signKey 可直接用于登录后的签名请求(实测 clientResource 通过)。
+- 仅 `clientType=SDPClient` + 特定 body 字段的受信请求需要;geekTrust 的登录与
+  授信终端流程**均不需要**此签名(资源拉取走浏览器路径,见 §4.1)。
 
 ### 10.4 SPA(单包授权,本网关当前非必需)
 

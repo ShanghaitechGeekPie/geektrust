@@ -23,6 +23,7 @@ type State struct {
 	CsrfToken string         `json:"csrf_token"`
 	Cookies   []CookieRecord `json:"cookies"`
 	Gateways  []string       `json:"gateways,omitempty"`
+	SignKey   string         `json:"sign_key,omitempty"`
 	SavedAt   time.Time      `json:"saved_at"`
 }
 

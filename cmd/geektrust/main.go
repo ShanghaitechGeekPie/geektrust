@@ -258,19 +258,20 @@ func cmdTrustDevice(ctx context.Context, cfg *config.Config, logger *slog.Logger
 		if err != nil {
 			return fmt.Errorf("query trust device: %w", err)
 		}
-		fmt.Printf("trusted terminals (%d/%d):\n", list.CurrentCount, list.MaxCount)
-		if list.DeviceTrusted {
-			fmt.Println("  current device: trusted")
-		} else {
-			fmt.Println("  current device: NOT trusted")
-		}
+		fmt.Printf("trust device policy enabled: %v, current trust status: %d\n",
+			list.Config.Enable, list.CurrentTrustStatus)
+		fmt.Printf("trusted terminals (%d):\n", len(list.Devices))
 		for _, d := range list.Devices {
 			marker := ""
-			if d.Current {
+			if d.ID == list.SelfID {
 				marker = " (current)"
 			}
-			fmt.Printf("  %s  %s  platform=%s  trustTime=%s  lastLogin=%s%s\n",
-				d.ID, d.DeviceName, d.Platform, d.TrustTime, d.LastLogin, marker)
+			name := d.DeviceName
+			if name == "" {
+				name = d.OS + " " + d.OSVersion
+			}
+			fmt.Printf("  %s  %s  type=%s  lastIP=%s %s%s\n",
+				d.ID, strings.TrimSpace(name), d.DeviceType, d.LastLoginIP, d.LastLoginAddress, marker)
 		}
 
 	case "bind":

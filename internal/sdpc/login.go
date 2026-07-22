@@ -106,11 +106,20 @@ func (c *Client) ReportEnv(ctx context.Context, casTicket string, ac *AuthConfig
 			"rsaCert":         ac.RsaCert,
 		},
 	}
-	err := c.doJSON(ctx, "POST", "/controller/v1/public/reportEnv", url.Values{}, body, nil)
+	err := c.doJSONWithType(ctx, "POST", "/controller/v1/public/reportEnv", c.loginClientType(), url.Values{}, body, nil)
 	if apiErr, ok := err.(*APIError); ok && apiErr.Code == CodeAlreadyLogged {
 		return nil
 	}
 	return err
+}
+
+// loginClientType returns the clientType used for reportEnv: the configured
+// login path (browser by default, desktop when client mode is enabled).
+func (c *Client) loginClientType() string {
+	if c.ClientType == ClientTypeDesktop {
+		return ClientTypeDesktop
+	}
+	return ClientTypeBrowser
 }
 
 // AuthCheck reports whether the controller requires SMS second factor.

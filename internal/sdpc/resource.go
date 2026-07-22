@@ -237,6 +237,9 @@ type clientResource struct {
 // path. The appList includes the catch-all apps (外网资源/内网资源段) that
 // authorize nearly all internal/external destinations.
 func (c *Client) ClientResource(ctx context.Context) (*Resource, error) {
+	// The resource policy (appList etc.) is only returned on the browser
+	// path; the signed desktop variant answers env config only. Browser path
+	// works on client-mode sessions too.
 	body := map[string]any{
 		"resourceType": map[string]any{
 			"sdpPolicy":       map[string]any{},

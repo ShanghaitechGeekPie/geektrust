@@ -23,16 +23,17 @@ const DefaultBaseURL = "https://vpn.shanghaitech.edu.cn"
 
 // Config is the top-level configuration.
 type Config struct {
-	Keystore  string   `toml:"keystore"`
-	DeviceID  string   `toml:"device_id"`
-	BaseURL   string   `toml:"base_url"`
-	Platform  string   `toml:"platform"`
-	AppID     string   `toml:"app_id"`
-	Gateways  []string `toml:"gateways"`
-	DNS       []string `toml:"dns"`
-	StateFile string   `toml:"state_file"`
-	LogLevel  string   `toml:"log_level"`
-	Inbound   Inbound  `toml:"inbound"`
+	Keystore   string   `toml:"keystore"`
+	DeviceID   string   `toml:"device_id"`
+	BaseURL    string   `toml:"base_url"`
+	Platform   string   `toml:"platform"`
+	AppID      string   `toml:"app_id"`
+	ClientType string   `toml:"client_type"`
+	Gateways   []string `toml:"gateways"`
+	DNS        []string `toml:"dns"`
+	StateFile  string   `toml:"state_file"`
+	LogLevel   string   `toml:"log_level"`
+	Inbound    Inbound  `toml:"inbound"`
 }
 
 // Inbound holds the proxy listener configuration.
@@ -83,6 +84,9 @@ func (c *Config) applyDefaults() {
 	if c.LogLevel == "" {
 		c.LogLevel = "info"
 	}
+	if c.ClientType == "" {
+		c.ClientType = "browser"
+	}
 	c.BaseURL = strings.TrimRight(c.BaseURL, "/")
 }
 
@@ -122,6 +126,11 @@ func (c *Config) validate() error {
 	case "debug", "info", "warn", "error":
 	default:
 		return fmt.Errorf("log_level must be one of debug/info/warn/error, got %q", c.LogLevel)
+	}
+	switch c.ClientType {
+	case "browser", "client":
+	default:
+		return fmt.Errorf("client_type must be \"browser\" or \"client\", got %q", c.ClientType)
 	}
 	return nil
 }

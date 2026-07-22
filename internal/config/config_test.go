@@ -30,6 +30,9 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.Platform != "Mac" || cfg.AppID != DefaultAppID || cfg.StateFile != "./state.enc" || cfg.LogLevel != "info" {
 		t.Errorf("defaults wrong: %+v", cfg)
 	}
+	if cfg.ClientType != "browser" {
+		t.Errorf("client_type default = %q", cfg.ClientType)
+	}
 }
 
 func TestLoadFull(t *testing.T) {
@@ -68,6 +71,7 @@ func TestLoadValidation(t *testing.T) {
 		"bad platform":      "keystore = \"k\"\nplatform = \"mac\"",
 		"bad dns":           "keystore = \"k\"\ndns = [\"dns.example.com\"]",
 		"bad log level":     "keystore = \"k\"\nlog_level = \"verbose\"",
+		"bad client type":   "keystore = \"k\"\nclient_type = \"desktop\"",
 		"enabled no listen": "keystore = \"k\"\n[inbound.socks5]\nenabled = true",
 	}
 	for name, body := range cases {

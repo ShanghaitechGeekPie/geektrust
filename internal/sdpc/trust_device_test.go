@@ -37,17 +37,22 @@ func TestQueryTrustDevice(t *testing.T) {
 		if r.URL.Query().Get("clientType") != ClientTypeBrowser {
 			t.Errorf("clientType = %s", r.URL.Query().Get("clientType"))
 		}
+		if got := r.URL.Query().Get("status"); got != "trust" {
+			t.Errorf("status = %q, want trust", got)
+		}
 		json.NewEncoder(w).Encode(map[string]any{
 			"code":    0,
 			"message": "OK",
 			"data": map[string]any{
-				"deviceList": []map[string]any{
-					{"id": "dev-1", "deviceName": "MacBook", "isCurrent": true},
-					{"id": "dev-2", "deviceName": "iPhone", "isCurrent": false},
+				"data": []map[string]any{
+					{"id": "dev-1", "deviceName": "MacBook", "deviceType": "browser",
+						"os": "macOS", "osVersion": "15.5", "lastLoginIp": "116.230.1.2",
+						"lastLoginAddress": "LAN", "networkZoneList": []string{"默认网络区域"}},
+					{"id": "dev-2", "deviceName": "Windows-PC", "deviceType": "windows"},
 				},
-				"maxCount":      5,
-				"currentCount":  2,
-				"deviceTrusted": true,
+				"selfId":             "dev-1",
+				"currentTrustStatus": 1,
+				"trustDeviceConfig":  map[string]any{"enable": true},
 			},
 		})
 	})
@@ -59,11 +64,35 @@ func TestQueryTrustDevice(t *testing.T) {
 	if len(list.Devices) != 2 {
 		t.Fatalf("device count = %d", len(list.Devices))
 	}
-	if list.MaxCount != 5 || list.CurrentCount != 2 || !list.DeviceTrusted {
+	if list.SelfID != "dev-1" || list.CurrentTrustStatus != 1 || !list.Config.Enable {
 		t.Errorf("list = %+v", list)
 	}
-	if list.Devices[0].ID != "dev-1" || !list.Devices[0].Current {
-		t.Errorf("device[0] = %+v", list.Devices[0])
+	d := list.Devices[0]
+	if d.ID != "dev-1" || d.DeviceType != "browser" || d.OS != "macOS" || d.LastLoginIP == "" {
+		t.Errorf("device[0] = %+v", d)
+	}
+}
+
+func TestQueryUntrustedDevice(t *testing.T) {
+	c := newTrustTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("status"); got != "untrust" {
+			t.Errorf("status = %q, want untrust", got)
+		}
+		json.NewEncoder(w).Encode(map[string]any{
+			"code":    0,
+			"message": "OK",
+			"data": map[string]any{
+				"data": []map[string]any{{"id": "dev-9", "deviceName": "Old PC"}},
+			},
+		})
+	})
+
+	devs, err := c.QueryUntrustedDevice(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(devs) != 1 || devs[0].ID != "dev-9" {
+		t.Errorf("devices = %+v", devs)
 	}
 }
 
@@ -99,8 +128,8 @@ func TestTrustDeviceBind(t *testing.T) {
 func TestTrustDeviceBindError(t *testing.T) {
 	c := newTrustTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{
-			"code":    75500311,
-			"message": "ADD_TRUST_DEVICE_UPPER_LIMIT",
+			"code":    75500000,
+			"message": "当前未安装客户端或使用纯web模式登录，无法添加授信终端",
 			"data":    nil,
 		})
 	})
@@ -113,7 +142,7 @@ func TestTrustDeviceBindError(t *testing.T) {
 	if !errors.As(err, &apiErr) {
 		t.Fatalf("error type = %T", err)
 	}
-	if apiErr.Code != 75500311 {
+	if apiErr.Code != 75500000 {
 		t.Errorf("code = %d", apiErr.Code)
 	}
 }

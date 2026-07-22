@@ -50,9 +50,10 @@ shanghaitech-ids-passkey bind --keystore ids-passkey.keystore
 
 ```toml
 keystore = "./ids-passkey.keystore"   # passkey 凭据
-device_id = "84B5B45FE73EC0036C3E97717308447F"  # 持久化设备标识,勿改
+device_id = "84B5B45FE73EC0036C3E97717308447F"  # 持久化设备标识,请设置一个自己的唯一标识
 base_url = "https://vpn.shanghaitech.edu.cn"
 platform = "Mac"                      # 大小写敏感
+client_type = "browser"               # browser:纯 web 会话;client:客户端模式(可绑定授信终端)
 gateways = []                         # 留空 = 从上游自动获取网关线路
 dns = []                              # 可选:覆盖上游下发的隧道内 DNS
 state_file = "./state.enc"            # 加密的会话凭据
@@ -76,6 +77,12 @@ listen = "127.0.0.1:8080"    # 同上:改成 0.0.0.0 会把你的 VPN 会话暴�
 
 # 经隧道拨号自检(443 端口会完成 TLS 握手并打印证书主题)
 ./geektrust -config config.toml dial library.shanghaitech.edu.cn
+
+# 授信终端管理(需要 client_type = "client")
+./geektrust -config config.toml trust-device list       # 查询授信终端
+./geektrust -config config.toml trust-device bind       # 手动绑定本机
+./geektrust -config config.toml trust-device unbind <id>
+./geektrust -config config.toml trust-device logout <id>
 ```
 
 经代理访问:
@@ -99,15 +106,19 @@ UDP 有两种标准入口:
 
 ## 短信验证
 
-新 device_id 首次登录必定触发短信二次验证,无法绕过。之后是否需要短信由服务端
-决定:`device_id` 持久化且不应更改,会话凭据加密保存(`state.enc` + 自动生成的
-`state.enc.key`,均 0600 权限),重启直接复用,会话失效时 passkey 静默重登。
-只要会话能持续或静默恢复,就不会再要求短信。
+新 device_id 首次登录必定触发短信二次验证,无法绕过。要**长期免短信**,把
+`client_type` 设为 `"client"`:登录时 reportEnv 会以 `clientType=SDPClient`
+上报,会话成为「客户端模式」;短信验证成功后会话建立时 geekTrust 自动调用
+`POST /passport/v1/security/trustDevice` 把本机绑定为授信终端。之后同一
+`device_id` 的完整登录 `authCheck` 不再要求短信,直接走 `ticketExchange`
+(已实测:绑定后删除状态文件重新登录仍免短信,资源策略完整拉取)。
 
-注意:实测发现当会话彻底失效、需要走完整登录流程时,服务端可能再次要求短信
-(设备信任并未稳定地记住 device_id)。因此「免短信」依赖保持会话存活,
-而不是设备绑定本身。更换 `device_id` 或删除状态文件后重新登录,也可能
-再次要求短信。
+`client_type = "browser"`(默认)时为纯 web 会话,无法绑定授信终端
+(服务器返回 75500000);此时免短信只能依赖会话持续存活与静默恢复。
+
+无论哪种模式,`device_id` 都必须持久化且不应更改;更换 `device_id` 会被视为
+新设备,需要重新短信验证并重新绑定。会话凭据加密保存(`state.enc` +
+自动生成的 `state.enc.key`,均 0600 权限),重启直接复用。
 
 ## 路由与解析
 
