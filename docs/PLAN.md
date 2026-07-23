@@ -250,8 +250,9 @@ browser 模式下服务端是否再次要求短信并不完全由 `device_id` �
 
 ```toml
 # 登录
-keystore = "./ids-passkey.keystore"     # passkey 凭据(由 Python 库 bind 生成)
-device_id = "84B5B45FE73EC0036C3E97717308447F"   # 持久化设备标识(勿改)
+keystore = "./ids-passkey.keystore"     # passkey 凭据（由 bind 生成）
+device_id = "<init 生成的 32 位大写十六进制值>"  # 每个安装独立且持久化
+client_type = "client"                  # 支持授信终端绑定
 
 # 控制器
 base_url = "https://vpn.shanghaitech.edu.cn"

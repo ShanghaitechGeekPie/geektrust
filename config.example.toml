@@ -1,23 +1,20 @@
-# geekTrust 配置示例
-# 复制为 config.toml 后按需修改；命令行可用 -config 指定路径。
+# geekTrust 手工配置模板。优先运行 `geektrust init`;它会生成唯一 device_id
+# 并写入可直接使用的 client 模式配置。
 
 # ---- 登录 ----
 # passkey 凭据文件(由 shanghaitech-ids-passkey 的 bind 命令生成)。
 keystore = "./ids-passkey.keystore"
 
-# 持久化设备标识(32 位大写十六进制)。新设备首次登录需要短信验证;
-# 后续完整登录也可能由服务端再次要求短信。一经使用请勿更改,否则服务器
-# 会视为新设备。默认值 = MD5("atrust-headless-client-v1").upper()。
-device_id = "84B5B45FE73EC0036C3E97717308447F"
+# 每个安装必须使用自己的 32 位大写十六进制 device_id。可由
+# `geektrust init` 安全生成;一经登录请勿修改。
+device_id = "REPLACE_WITH_32_UPPERCASE_HEX"
 
 # ---- 控制器 ----
 base_url = "https://vpn.shanghaitech.edu.cn"
 platform = "Mac"            # 大小写敏感,必须为 Mac
 
-# 登录路径:browser(默认,纯 web 会话)或 client(客户端模式)。
-# client 模式下 reportEnv 以 clientType=SDPClient 上报,短信验证成功后会
-# 自动把本机绑定为授信终端,之后同一 device_id 的完整登录免短信。
-# client_type = "client"
+# client 模式会在首次验证后尝试绑定授信终端;绑定成功后,后续完整登录通常不再要求短信。
+client_type = "client"
 
 # clientResource 没有匹配的精确域名、IP 或后缀规则时使用的兜底 appId。
 app_id = "681165d0-1c77-11ed-8650-cd35a51aa42a"

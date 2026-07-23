@@ -71,7 +71,7 @@
 
 | 名称 | 说明 |
 |---|---|
-| `device_id` | 设备标识,32 位大写十六进制。规范值取 `MD5("atrust-headless-client-v1").upper()` = `84B5B45FE73EC0036C3E97717308447F`。必须持久化并保持不变;更换后服务器会视为新设备。固定该值和复用会话可减少短信验证,但服务端仍可能在后续完整登录中再次要求短信。(参考脚本 `atrust_socks5.py` 中的兜底默认值 `83D23A2C…` 仅为占位。) |
+| `device_id` | 设备标识，格式为 32 位大写十六进制。每个安装必须使用独立随机值；`geektrust init` 会通过系统安全随机源生成。首次登录后必须持久化并保持不变，更换后服务器会视为新设备。client 模式会拒绝旧版共享默认值，因为复用已授信的设备标识会破坏短信验证的设备边界。 |
 | `sid` | 会话 ID,形如 `<unitid>_<uuid>`(如 `9e700fcd-…_63c16989-…`),由 `sessionIdExchange` 通过 Set-Cookie 确立。隧道认证与每连接认证均使用它。 |
 | `sidTicket` | 一次性票据,来自 `checkcode`/`ticketExchange`,用于换取 `sid`。 |
 | `csrfToken` | 来自 `authConfig.data.security.csrfToken`,作为 `x-csrf-token` 头。 |
