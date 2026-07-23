@@ -17,11 +17,12 @@ func TestStoreRoundTrip(t *testing.T) {
 	}
 
 	want := &State{
-		SID:       "unit-1_uuid-2",
-		DeviceID:  "84B5B45FE73EC0036C3E97717308447F",
-		CsrfToken: "csrf-abc",
-		Cookies:   []CookieRecord{{Name: "sid", Value: "unit-1_uuid-2"}, {Name: "lang", Value: "zh-CN"}},
-		Gateways:  []string{"119.78.254.241:441"},
+		SID:        "unit-1_uuid-2",
+		DeviceID:   "0123456789ABCDEF0123456789ABCDEF",
+		CsrfToken:  "csrf-abc",
+		Cookies:    []CookieRecord{{Name: "sid", Value: "unit-1_uuid-2"}, {Name: "lang", Value: "zh-CN"}},
+		Gateways:   []string{"192.0.2.10:441"},
+		ClientType: "client",
 	}
 	if err := st.Save(want); err != nil {
 		t.Fatalf("Save: %v", err)
@@ -49,7 +50,8 @@ func TestStoreRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if got.SID != want.SID || got.DeviceID != want.DeviceID || got.CsrfToken != want.CsrfToken {
+	if got.SID != want.SID || got.DeviceID != want.DeviceID || got.CsrfToken != want.CsrfToken ||
+		got.ClientType != want.ClientType {
 		t.Errorf("round trip mismatch: %+v", got)
 	}
 	if len(got.Cookies) != 2 || got.Cookies[0].Name != "sid" {

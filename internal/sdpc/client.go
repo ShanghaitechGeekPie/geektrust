@@ -40,7 +40,6 @@ const (
 	CodeAlreadyLogged  = 10000000 // user has been logged in
 	CodeInvalidParam   = 10000001
 	CodeSessionMissing = 10000004 // session not found
-	CodePartSuccess    = 10000007 // partial success (clientResource sub-envelopes may fail)
 	CodeSigVerify      = 10000008
 	CodeAuthTimeout    = 75500001 // 当前认证已超时
 	CodeSessionInvalid = 75500002 // 会话无效/未登录

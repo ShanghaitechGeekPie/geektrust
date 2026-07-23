@@ -37,23 +37,23 @@ func TestLoadDefaults(t *testing.T) {
 
 func TestLoadFull(t *testing.T) {
 	path := writeConfig(t, `
-keystore = "./ids.keystore"
-device_id = "84B5B45FE73EC0036C3E97717308447F"
-base_url = "https://vpn.shanghaitech.edu.cn/"
-gateways = ["119.78.254.241:441", "59.78.171.241"]
-dns = ["223.5.5.5"]
+keystore = "./k.keystore"
+device_id = "0123456789ABCDEF0123456789ABCDEF"
+base_url = "https://vpn.example.invalid/"
+platform = "Mac"
+gateways = ["192.0.2.10:441", "198.51.100.10:441"]
+dns = ["192.0.2.53"]
+client_type = "client"
+
 [inbound.socks5]
 enabled = true
 listen = "127.0.0.1:1080"
-[inbound.http]
-enabled = true
-listen = "127.0.0.1:8080"
 `)
 	cfg, err := Load(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.BaseURL != "https://vpn.shanghaitech.edu.cn" {
+	if cfg.BaseURL != "https://vpn.example.invalid" {
 		t.Errorf("trailing slash not trimmed: %q", cfg.BaseURL)
 	}
 	if len(cfg.Gateways) != 2 || len(cfg.DNS) != 1 {
@@ -61,6 +61,9 @@ listen = "127.0.0.1:8080"
 	}
 	if !cfg.Inbound.SOCKS5.Enabled || cfg.Inbound.SOCKS5.Listen != "127.0.0.1:1080" {
 		t.Errorf("socks5 = %+v", cfg.Inbound.SOCKS5)
+	}
+	if cfg.ClientType != "client" {
+		t.Errorf("client_type = %q", cfg.ClientType)
 	}
 }
 
@@ -72,6 +75,7 @@ func TestLoadValidation(t *testing.T) {
 		"bad dns":           "keystore = \"k\"\ndns = [\"dns.example.com\"]",
 		"bad log level":     "keystore = \"k\"\nlog_level = \"verbose\"",
 		"bad client type":   "keystore = \"k\"\nclient_type = \"desktop\"",
+		"client default id": "keystore = \"k\"\nclient_type = \"client\"",
 		"enabled no listen": "keystore = \"k\"\n[inbound.socks5]\nenabled = true",
 	}
 	for name, body := range cases {
@@ -86,10 +90,10 @@ func TestSplitHostPort(t *testing.T) {
 		in, host, port string
 		wantErr        bool
 	}{
-		{"119.78.254.241:441", "119.78.254.241", "441", false},
-		{"59.78.171.241", "59.78.171.241", "441", false},
-		{"[2001:da8:801d:d5a:9020:100:d:5a93]:441", "2001:da8:801d:d5a:9020:100:d:5a93", "441", false},
-		{"gw.example.com", "gw.example.com", "441", false},
+		{"192.0.2.10:441", "192.0.2.10", "441", false},
+		{"198.51.100.10", "198.51.100.10", "441", false},
+		{"[2001:db8::10]:441", "2001:db8::10", "441", false},
+		{"gw.example.invalid", "gw.example.invalid", "441", false},
 		{"", "", "", true},
 	}
 	for _, c := range cases {

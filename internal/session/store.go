@@ -23,8 +23,12 @@ type State struct {
 	CsrfToken string         `json:"csrf_token"`
 	Cookies   []CookieRecord `json:"cookies"`
 	Gateways  []string       `json:"gateways,omitempty"`
-	SignKey   string         `json:"sign_key,omitempty"`
-	SavedAt   time.Time      `json:"saved_at"`
+	// ClientType records the login path that established this session
+	// ("browser" or "client"). Restoring a session whose mode differs from
+	// the current config would use the wrong server-side session mode, so
+	// the provider skips restore and performs a full login instead.
+	ClientType string    `json:"client_type,omitempty"`
+	SavedAt    time.Time `json:"saved_at"`
 }
 
 // CookieRecord is a serializable name/value cookie pair.

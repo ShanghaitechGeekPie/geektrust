@@ -45,10 +45,10 @@ func TestQueryTrustDevice(t *testing.T) {
 			"message": "OK",
 			"data": map[string]any{
 				"data": []map[string]any{
-					{"id": "dev-1", "deviceName": "MacBook", "deviceType": "browser",
-						"os": "macOS", "osVersion": "15.5", "lastLoginIp": "116.230.1.2",
-						"lastLoginAddress": "LAN", "networkZoneList": []string{"默认网络区域"}},
-					{"id": "dev-2", "deviceName": "Windows-PC", "deviceType": "windows"},
+					{"id": "dev-1", "deviceName": "Test-Mac", "deviceType": "browser",
+						"os": "macOS", "osVersion": "15.5", "lastLoginIp": "192.0.2.2",
+						"lastLoginAddress": "test-zone", "networkZoneList": []string{"test-network"}, "onlineStatus": true},
+					{"id": "dev-2", "deviceName": "Test-Windows", "deviceType": "windows", "onlineStatus": false},
 				},
 				"selfId":             "dev-1",
 				"currentTrustStatus": 1,
@@ -70,6 +70,9 @@ func TestQueryTrustDevice(t *testing.T) {
 	d := list.Devices[0]
 	if d.ID != "dev-1" || d.DeviceType != "browser" || d.OS != "macOS" || d.LastLoginIP == "" {
 		t.Errorf("device[0] = %+v", d)
+	}
+	if !d.OnlineStatus {
+		t.Errorf("device[0].onlineStatus = false, want true")
 	}
 }
 

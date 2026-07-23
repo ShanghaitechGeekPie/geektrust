@@ -246,6 +246,18 @@ func (p *Provider) restore(ctx context.Context) (*Credential, error) {
 			"state_device", st.DeviceID, "config_device", p.cfg.DeviceID)
 		return nil, nil
 	}
+	// reportEnv sets the server-side session mode (browser vs client).
+	// Legacy states predate this field and cannot be classified safely because
+	// both modes were already supported; force one fresh, tagged login.
+	if st.ClientType == "" {
+		p.logger.Warn("persisted session has no client_type; ignoring")
+		return nil, nil
+	}
+	if st.ClientType != p.cfg.ClientType {
+		p.logger.Warn("persisted session was established in a different client_type; ignoring",
+			"state_type", st.ClientType, "config_type", p.cfg.ClientType)
+		return nil, nil
+	}
 
 	jar, _ := cookiejar.New(nil)
 	hc := &http.Client{Jar: jar, Timeout: 30 * time.Second}
@@ -421,11 +433,12 @@ func (p *Provider) finishLogin(ctx context.Context, sc *sdpc.Client, gatewaysOve
 		records = append(records, CookieRecord{Name: ck.Name, Value: ck.Value})
 	}
 	if err := p.store.Save(&State{
-		SID:       cred.SID,
-		DeviceID:  cred.DeviceID,
-		CsrfToken: cred.CsrfToken,
-		Cookies:   records,
-		Gateways:  cred.Gateways,
+		SID:        cred.SID,
+		DeviceID:   cred.DeviceID,
+		CsrfToken:  cred.CsrfToken,
+		Cookies:    records,
+		Gateways:   cred.Gateways,
+		ClientType: p.cfg.ClientType,
 	}); err != nil {
 		// Credentials are live; persistence failure should not abort the login.
 		p.logger.Error("failed to persist session state", "err", err)

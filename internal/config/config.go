@@ -10,9 +10,9 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
-// DefaultDeviceID is MD5("atrust-headless-client-v1").upper(). It must stay
-// stable per installation because changing it makes the controller treat the
-// client as a new device.
+// DefaultDeviceID is the legacy shared browser-mode identifier. It remains
+// for backward compatibility, but client mode rejects it because trusted
+// terminals require a unique identity per installation.
 const DefaultDeviceID = "84B5B45FE73EC0036C3E97717308447F"
 
 // DefaultAppID is the "电子资源" (library) application.
@@ -131,6 +131,12 @@ func (c *Config) validate() error {
 	case "browser", "client":
 	default:
 		return fmt.Errorf("client_type must be \"browser\" or \"client\", got %q", c.ClientType)
+	}
+	// client mode binds the device_id as a trusted terminal; the shared
+	// default ID would let anyone with the same credentials inherit that
+	// trust, defeating SMS. Require an explicit, non-default device_id.
+	if c.ClientType == "client" && c.DeviceID == DefaultDeviceID {
+		return fmt.Errorf("client_type=client requires a non-default device_id; set a unique 32-hex identifier")
 	}
 	return nil
 }

@@ -2,12 +2,16 @@ package session
 
 import (
 	"context"
+	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"geektrust/internal/config"
 )
 
 // TestProviderSingleFlightBroadcast: every concurrent caller of Credential
@@ -75,6 +79,52 @@ func TestProviderSingleFlightBroadcast(t *testing.T) {
 		if errs[i] != nil || results[i] == nil || results[i].SID != "shared" {
 			t.Errorf("waiter %d got cred=%v err=%v", i, results[i], errs[i])
 		}
+	}
+}
+
+func TestRestoreSkipsDifferentClientType(t *testing.T) {
+	tests := []struct {
+		name       string
+		stateType  string
+		configType string
+	}{
+		{name: "browser state in client mode", stateType: "browser", configType: "client"},
+		{name: "client state in browser mode", stateType: "client", configType: "browser"},
+		{name: "legacy state in client mode", configType: "client"},
+		{name: "legacy state in browser mode", configType: "browser"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			statePath := filepath.Join(t.TempDir(), "state.enc")
+			store := NewStore(statePath)
+			const deviceID = "0123456789ABCDEF0123456789ABCDEF"
+			if err := store.Save(&State{
+				SID:        "synthetic-session",
+				DeviceID:   deviceID,
+				Cookies:    []CookieRecord{{Name: "sid", Value: "synthetic-session"}},
+				ClientType: tt.stateType,
+			}); err != nil {
+				t.Fatal(err)
+			}
+
+			p := &Provider{
+				cfg: &config.Config{
+					BaseURL:    "http://127.0.0.1:1",
+					Platform:   "Mac",
+					DeviceID:   deviceID,
+					ClientType: tt.configType,
+				},
+				logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+				store:  store,
+			}
+			cred, err := p.restore(context.Background())
+			if err != nil {
+				t.Fatalf("restore returned error instead of skipping mismatched state: %v", err)
+			}
+			if cred != nil {
+				t.Fatalf("restore returned credential for mismatched state: %+v", cred)
+			}
+		})
 	}
 }
 
