@@ -31,7 +31,7 @@ func main() {
 	var configPath string
 	flag.StringVar(&configPath, "config", "config.toml", "path to the TOML config file")
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: geektrust [-config config.toml] <command>\n\nCommands:\n  run               ensure a session, then start the SOCKS5/HTTP proxies (default)\n  login             establish a VPN session (passkey; SMS when required)\n  dial <host[:port]>  connect through the tunnel (TLS handshake on :443)\n  trust-device <sub>  manage trusted terminals (list | bind | unbind <id> | logout <id>)\n")
+		fmt.Fprintf(os.Stderr, "Usage: geektrust [-config config.toml] <command>\n\nCommands:\n  init              generate a client-mode config and unique device ID\n  run               ensure a session, then start the SOCKS5/HTTP proxies (default)\n  login             establish a VPN session (passkey; SMS when required)\n  dial <host[:port]>  connect through the tunnel (TLS handshake on :443)\n  trust-device <sub>  manage trusted terminals (list | bind | unbind <id> | logout <id>)\n")
 		flag.PrintDefaults()
 	}
 	flag.Parse()
@@ -42,15 +42,23 @@ func main() {
 		cmd, args = args[0], args[1:]
 	}
 
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	if cmd == "init" {
+		if err := cmdInit(ctx, configPath, args); err != nil {
+			fmt.Fprintln(os.Stderr, "geektrust init:", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	cfg, err := config.Load(configPath)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "geektrust:", err)
 		os.Exit(1)
 	}
 	logger := newLogger(cfg.LogLevel)
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 
 	switch cmd {
 	case "login":
@@ -234,12 +242,53 @@ func cmdDial(ctx context.Context, cfg *config.Config, logger *slog.Logger, args 
 	return nil
 }
 
+func validateTrustDeviceArgs(cfg *config.Config, args []string) (string, error) {
+	if len(args) == 0 {
+		return "", fmt.Errorf("trust-device requires a subcommand: list | bind | unbind <id> | logout <id>")
+	}
+
+	sub := args[0]
+	switch sub {
+	case "list":
+		if len(args) != 1 {
+			return "", fmt.Errorf("list takes no arguments")
+		}
+	case "bind":
+		if len(args) != 1 {
+			return "", fmt.Errorf("bind takes no arguments")
+		}
+		if cfg.ClientType != "client" {
+			return "", fmt.Errorf("trust-device bind requires client_type = \"client\" in config")
+		}
+	case "unbind":
+		if len(args) < 2 {
+			return "", fmt.Errorf("unbind requires at least one device ID")
+		}
+		for _, id := range args[1:] {
+			if strings.TrimSpace(id) == "" {
+				return "", fmt.Errorf("unbind device IDs must not be empty")
+			}
+		}
+	case "logout":
+		if len(args) != 2 {
+			return "", fmt.Errorf("logout requires exactly one device ID")
+		}
+		if strings.TrimSpace(args[1]) == "" {
+			return "", fmt.Errorf("logout device ID must not be empty")
+		}
+	default:
+		return "", fmt.Errorf("unknown subcommand %q: use list | bind | unbind <id> | logout <id>", sub)
+	}
+	return sub, nil
+}
+
 // cmdTrustDevice manages trusted terminals: list, bind (mark this device as
 // trusted), unbind (remove a device by ID), or logout (logout a device by ID).
 // Requires an active session — run `geektrust login` first if needed.
 func cmdTrustDevice(ctx context.Context, cfg *config.Config, logger *slog.Logger, args []string) error {
-	if len(args) == 0 {
-		return fmt.Errorf("trust-device requires a subcommand: list | bind | unbind <id> | logout <id>")
+	sub, err := validateTrustDeviceArgs(cfg, args)
+	if err != nil {
+		return err
 	}
 
 	provider := session.NewProvider(cfg, logger, smsPrompt)
@@ -251,7 +300,6 @@ func cmdTrustDevice(ctx context.Context, cfg *config.Config, logger *slog.Logger
 		return fmt.Errorf("trust-device: no controller client available")
 	}
 
-	sub := args[0]
 	switch sub {
 	case "list":
 		list, err := sc.QueryTrustDevice(ctx)
@@ -282,25 +330,17 @@ func cmdTrustDevice(ctx context.Context, cfg *config.Config, logger *slog.Logger
 		fmt.Println("subsequent logins with the same device_id may skip SMS verification")
 
 	case "unbind":
-		if len(args) < 2 {
-			return fmt.Errorf("unbind requires a device ID")
-		}
 		if err := sc.UntrustDevice(ctx, args[1:]); err != nil {
 			return fmt.Errorf("unbind trust device: %w", err)
 		}
 		fmt.Printf("untrusted device(s): %s\n", strings.Join(args[1:], ", "))
 
 	case "logout":
-		if len(args) < 2 {
-			return fmt.Errorf("logout requires a device ID")
-		}
 		if err := sc.LogoutDevice(ctx, args[1]); err != nil {
 			return fmt.Errorf("logout trust device: %w", err)
 		}
 		fmt.Printf("logged out device: %s\n", args[1])
 
-	default:
-		return fmt.Errorf("unknown subcommand %q: use list | bind | unbind <id> | logout <id>", sub)
 	}
 	return nil
 }
