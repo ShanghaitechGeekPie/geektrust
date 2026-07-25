@@ -13,3 +13,8 @@
 # misc
 *.log
 .DS_Store
+
+# frontend
+web/node_modules/
+internal/webui/dist/*
+!internal/webui/dist/.gitkeep

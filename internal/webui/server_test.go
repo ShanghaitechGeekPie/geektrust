@@ -424,10 +424,63 @@ func TestTrustDeviceEndpoints(t *testing.T) {
 
 func TestStaticPlaceholderWithoutFrontend(t *testing.T) {
 	fp := &fakeProvider{}
-	srv, _, _ := newPanelTestServer(t, "client", fp)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := testConfig("client")
+	cfg.Web.Listen = listener.Addr().String()
+	hub := NewHub(cfg)
+	server := NewServer(hub, NewBroker(hub.SetSMSPending), fp, cfg)
+	server.hasUI = false // force the placeholder branch regardless of local build state
+	srv := httptest.NewUnstartedServer(server.http.Handler)
+	srv.Listener = listener
+	srv.Start()
+	defer srv.Close()
+
 	resp := doJSON(t, srv.Client(), "GET", srv.URL+"/", "", nil)
 	body := readBody(t, resp)
 	if resp.StatusCode != 200 || !strings.Contains(body, "前端资源尚未构建") {
 		t.Errorf("placeholder = %d %q", resp.StatusCode, body[:min(len(body), 80)])
+	}
+}
+
+// TestStaticServesBuiltFrontend asserts the embedded production build is
+// served end to end. It skips on clean checkouts where dist holds only
+// .gitkeep (the placeholder path is covered above).
+func TestStaticServesBuiltFrontend(t *testing.T) {
+	fp := &fakeProvider{}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := testConfig("client")
+	cfg.Web.Listen = listener.Addr().String()
+	hub := NewHub(cfg)
+	server := NewServer(hub, NewBroker(hub.SetSMSPending), fp, cfg)
+	if !server.hasUI {
+		t.Skip("frontend not built; run make web")
+	}
+	srv := httptest.NewUnstartedServer(server.http.Handler)
+	srv.Listener = listener
+	srv.Start()
+	defer srv.Close()
+
+	resp := doJSON(t, srv.Client(), "GET", srv.URL+"/", "", nil)
+	body := readBody(t, resp)
+	if resp.StatusCode != 200 || !strings.Contains(body, `id="root"`) {
+		t.Fatalf("index = %d %q", resp.StatusCode, body[:min(len(body), 120)])
+	}
+	asset := strings.TrimPrefix(strings.TrimSpace(strings.Split(strings.Split(body, "src=")[1], "\"")[1]), "/")
+	resp = doJSON(t, srv.Client(), "GET", srv.URL+"/"+asset, "", nil)
+	if resp.StatusCode != 200 {
+		t.Fatalf("asset %s = %d", asset, resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// SPA fallback: an unknown non-API path also gets the app shell.
+	resp = doJSON(t, srv.Client(), "GET", srv.URL+"/some/route", "", nil)
+	if body := readBody(t, resp); resp.StatusCode != 200 || !strings.Contains(body, `id="root"`) {
+		t.Errorf("SPA fallback = %d", resp.StatusCode)
 	}
 }
