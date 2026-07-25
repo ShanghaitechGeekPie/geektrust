@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/BurntSushi/toml"
@@ -21,19 +22,23 @@ const DefaultAppID = "681165d0-1c77-11ed-8650-cd35a51aa42a"
 // DefaultBaseURL is the ShanghaiTech aTrust controller.
 const DefaultBaseURL = "https://vpn.shanghaitech.edu.cn"
 
+// DefaultWebListen is the default loopback address of the status panel.
+const DefaultWebListen = "127.0.0.1:8081"
+
 // Config is the top-level configuration.
 type Config struct {
-	Keystore   string   `toml:"keystore"`
-	DeviceID   string   `toml:"device_id"`
-	BaseURL    string   `toml:"base_url"`
-	Platform   string   `toml:"platform"`
-	AppID      string   `toml:"app_id"`
-	ClientType string   `toml:"client_type"`
-	Gateways   []string `toml:"gateways"`
-	DNS        []string `toml:"dns"`
-	StateFile  string   `toml:"state_file"`
-	LogLevel   string   `toml:"log_level"`
-	Inbound    Inbound  `toml:"inbound"`
+	Keystore   string    `toml:"keystore"`
+	DeviceID   string    `toml:"device_id"`
+	BaseURL    string    `toml:"base_url"`
+	Platform   string    `toml:"platform"`
+	AppID      string    `toml:"app_id"`
+	ClientType string    `toml:"client_type"`
+	Gateways   []string  `toml:"gateways"`
+	DNS        []string  `toml:"dns"`
+	StateFile  string    `toml:"state_file"`
+	LogLevel   string    `toml:"log_level"`
+	Inbound    Inbound   `toml:"inbound"`
+	Web        WebConfig `toml:"web"`
 }
 
 // Inbound holds the proxy listener configuration.
@@ -46,6 +51,20 @@ type Inbound struct {
 type Listener struct {
 	Enabled bool   `toml:"enabled"`
 	Listen  string `toml:"listen"`
+}
+
+// WebConfig holds the local status panel configuration.
+type WebConfig struct {
+	// Enabled is a pointer to distinguish "unset" (default true) from an
+	// explicit false. It is the only pointer boolean in the configuration;
+	// do not spread this pattern.
+	Enabled *bool  `toml:"enabled"`
+	Listen  string `toml:"listen"`
+}
+
+// WebEnabled is the single entry point for the panel switch.
+func (c *Config) WebEnabled() bool {
+	return c.Web.Enabled == nil || *c.Web.Enabled
 }
 
 // Load reads a TOML file, applies defaults and validates the result.
@@ -88,6 +107,9 @@ func (c *Config) applyDefaults() {
 		c.ClientType = "browser"
 	}
 	c.BaseURL = strings.TrimRight(c.BaseURL, "/")
+	if c.Web.Listen == "" {
+		c.Web.Listen = DefaultWebListen
+	}
 }
 
 func (c *Config) validate() error {
@@ -138,6 +160,43 @@ func (c *Config) validate() error {
 	if c.ClientType == "client" && c.DeviceID == DefaultDeviceID {
 		return fmt.Errorf("client_type=client requires a non-default device_id; set a unique 32-hex identifier")
 	}
+	if c.WebEnabled() {
+		if err := c.validateWebListen(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateWebListen enforces the loopback-only policy and rewrites
+// Web.Listen to its canonical form (normalized IP literal, decimal port
+// without leading zeros). The panel's Host/Origin checks and its logged
+// URL all rely on this canonical value matching the browser-serialized
+// authority.
+func (c *Config) validateWebListen() error {
+	host, port, err := net.SplitHostPort(c.Web.Listen)
+	if err != nil {
+		return fmt.Errorf("web.listen must be host:port, got %q", c.Web.Listen)
+	}
+	portNum, err := strconv.Atoi(port)
+	if err != nil || portNum < 1 || portNum > 65535 {
+		return fmt.Errorf("web.listen port must be a decimal number in 1-65535, got %q", c.Web.Listen)
+	}
+	// Browsers elide the default HTTP port from the authority, so a port-80
+	// listener could never pass the panel's strict Host/Origin checks.
+	if portNum == 80 {
+		return fmt.Errorf("web.listen port 80 is not allowed (browsers omit the default port in Host/Origin)")
+	}
+	canonicalHost := host
+	if ip := net.ParseIP(host); ip != nil {
+		if !ip.IsLoopback() {
+			return fmt.Errorf("web.listen must be a loopback address, got %q", c.Web.Listen)
+		}
+		canonicalHost = ip.String()
+	} else if host != "localhost" {
+		return fmt.Errorf("web.listen must be a loopback address, got %q", c.Web.Listen)
+	}
+	c.Web.Listen = net.JoinHostPort(canonicalHost, strconv.Itoa(portNum))
 	return nil
 }
 

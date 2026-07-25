@@ -33,6 +33,9 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.ClientType != "browser" {
 		t.Errorf("client_type default = %q", cfg.ClientType)
 	}
+	if !cfg.WebEnabled() || cfg.Web.Listen != DefaultWebListen {
+		t.Errorf("web defaults = enabled %v, listen %q", cfg.WebEnabled(), cfg.Web.Listen)
+	}
 }
 
 func TestLoadFull(t *testing.T) {
@@ -82,6 +85,57 @@ func TestLoadValidation(t *testing.T) {
 		if _, err := Load(writeConfig(t, body)); err == nil {
 			t.Errorf("%s: expected validation error", name)
 		}
+	}
+}
+
+func TestWebListenValidation(t *testing.T) {
+	valid := map[string]string{
+		"127.0.0.1:8081":         "127.0.0.1:8081",
+		"localhost:8081":         "localhost:8081",
+		"[::1]:8081":             "[::1]:8081",
+		"[0:0:0:0:0:0:0:1]:8081": "[::1]:8081",
+		"127.0.0.1:08081":        "127.0.0.1:8081",
+	}
+	for in, want := range valid {
+		body := "keystore = \"k\"\n[web]\nlisten = \"" + in + "\""
+		cfg, err := Load(writeConfig(t, body))
+		if err != nil {
+			t.Errorf("%s: %v", in, err)
+			continue
+		}
+		if cfg.Web.Listen != want {
+			t.Errorf("%s: normalized listen = %q, want %q", in, cfg.Web.Listen, want)
+		}
+	}
+
+	invalid := []string{
+		"0.0.0.0:8081",
+		"192.0.2.10:8081",
+		"[2001:db8::1]:8081",
+		"example.invalid:8081",
+		"127.0.0.1:0",
+		"127.0.0.1:80",
+		"127.0.0.1:65536",
+		"127.0.0.1:http",
+		"127.0.0.1:",
+		"127.0.0.1",
+		":8081",
+	}
+	for _, in := range invalid {
+		body := "keystore = \"k\"\n[web]\nlisten = \"" + in + "\""
+		if _, err := Load(writeConfig(t, body)); err == nil {
+			t.Errorf("%s: expected validation error", in)
+		}
+	}
+
+	// Explicitly disabled panel skips listen semantics entirely.
+	disabled := "keystore = \"k\"\n[web]\nenabled = false\nlisten = \"0.0.0.0:80\""
+	cfg, err := Load(writeConfig(t, disabled))
+	if err != nil {
+		t.Fatalf("disabled web rejected: %v", err)
+	}
+	if cfg.WebEnabled() {
+		t.Error("web enabled despite enabled = false")
 	}
 }
 

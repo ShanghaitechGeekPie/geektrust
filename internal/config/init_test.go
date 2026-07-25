@@ -49,6 +49,18 @@ func TestInitializeDefaultsAndPreservesExistingConfig(t *testing.T) {
 	if !cfg.Inbound.SOCKS5.Enabled || !cfg.Inbound.HTTP.Enabled {
 		t.Errorf("listeners not enabled: %+v", cfg.Inbound)
 	}
+	if !cfg.WebEnabled() || cfg.Web.Listen != DefaultWebListen {
+		t.Errorf("web defaults = enabled %v, listen %q", cfg.WebEnabled(), cfg.Web.Listen)
+	}
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	webBlock := "[web]\nenabled = true\nlisten = \"" + DefaultWebListen + "\""
+	if !strings.Contains(string(raw), webBlock) {
+		t.Errorf("rendered config missing complete [web] block:\n%s", raw)
+	}
 
 	info, err := os.Stat(path)
 	if err != nil {
@@ -63,6 +75,10 @@ func TestInitializeDefaultsAndPreservesExistingConfig(t *testing.T) {
 	}
 	if loaded.DeviceID != cfg.DeviceID || loaded.ClientType != "client" {
 		t.Errorf("loaded config = %+v", loaded)
+	}
+	if loaded.WebEnabled() != cfg.WebEnabled() || loaded.Web.Listen != cfg.Web.Listen {
+		t.Errorf("loaded web = enabled %v listen %q, want %v %q",
+			loaded.WebEnabled(), loaded.Web.Listen, cfg.WebEnabled(), cfg.Web.Listen)
 	}
 
 	original, err := os.ReadFile(path)

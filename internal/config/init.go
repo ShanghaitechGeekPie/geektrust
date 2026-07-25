@@ -70,6 +70,9 @@ func PrepareInitialConfig(opts InitOptions) (*Config, error) {
 			HTTP:   Listener{Enabled: true, Listen: "127.0.0.1:8080"},
 		},
 	}
+	// applyDefaults fills Web.Listen (and guards every future default)
+	// before validation; validate also canonicalizes Web.Listen.
+	cfg.applyDefaults()
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
@@ -114,10 +117,15 @@ listen = %s
 [inbound.http]
 enabled = true
 listen = %s
+
+[web]
+enabled = %t
+listen = %s
 `,
 		q(cfg.Keystore), q(cfg.DeviceID), q(cfg.BaseURL), q(cfg.Platform),
 		q(cfg.ClientType), q(cfg.StateFile), q(cfg.LogLevel),
 		q(cfg.Inbound.SOCKS5.Listen), q(cfg.Inbound.HTTP.Listen),
+		cfg.WebEnabled(), q(cfg.Web.Listen),
 	))
 }
 
