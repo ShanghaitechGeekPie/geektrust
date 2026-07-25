@@ -110,11 +110,18 @@ geektrust/
       udp.go                       #   connected UDP flow 表、重建与回收
       server.go                    #   监听/并发/优雅退出
     resolver/                      # 域名→隧道内 IP(Resolver 实现)
-    config/                        # 配置加载/状态路径
+    config/                        # 配置加载/初始化(init)/状态路径
+    webui/                         # Web 面板(docs/WEBUI.md)
+      hub.go                       #   状态推导/快照/事件环形缓冲/SSE 订阅
+      broker.go                    #   短信双通道(网页 + 共享 stdin 读取器)先到先赢
+      server.go                    #   HTTP+SSE 服务、Host/Origin/CT 校验、内嵌前端
+      dist/                        #   前端构建产物(embed;gitignore,仅 .gitkeep 入库)
+  web/                             # 面板前端源码(React + Vite + TS;产物不入库)
   config.example.toml
 docs/
   TECHNICAL.md                     # 协议技术规格(权威)
   PLAN.md                          # 本文档
+  WEBUI.md                         # Web 面板设计守则
   ANALYSIS.md / HANDOFF.md / PROTOCOL.md   # 早期调研笔记(归档,仅供内部参考)
 ```
 
@@ -269,7 +276,16 @@ listen = "127.0.0.1:8080"
 
 # 状态持久化
 state_file = "./state.enc"              # 加密会话凭据(0600)
+
+# Web 面板(仅回环;enabled 默认 true)
+[web]
+enabled = true
+listen = "127.0.0.1:8081"
 ```
+
+Web 面板(`internal/webui/`):`run` 期间提供本机状态页(仅回环,默认 127.0.0.1:8081)。
+会话事件经 session 包的异步 FIFO 分发到 Hub;短信验证经 Broker 在网页与终端
+双通道先到先赢。设计守则为 [`docs/WEBUI.md`](./WEBUI.md)。
 
 ---
 
