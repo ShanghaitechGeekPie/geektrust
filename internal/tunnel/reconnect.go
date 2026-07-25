@@ -181,7 +181,9 @@ func (m *Manager) connect(ctx context.Context) (*Tunnel, error) {
 			if len(tried) >= len(cred.Gateways) && len(authRejects) > 0 {
 				m.logger.Warn("tunnel auth rejected on every reachable line; re-logging in",
 					"rejects", len(authRejects))
-				m.provider.Invalidate()
+				// Only drop the credential we actually used: a concurrent
+				// refresh may already have replaced it with a working one.
+				m.provider.InvalidateIfCurrent(cred)
 				authRejects = make(map[string]int64)
 				tried = make(map[string]bool)
 			}

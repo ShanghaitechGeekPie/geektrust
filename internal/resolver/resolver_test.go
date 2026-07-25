@@ -83,7 +83,7 @@ func (p *staticProvider) Credential(context.Context) (*session.Credential, error
 	return p.cred, nil
 }
 
-func (*staticProvider) Invalidate() {}
+func (*staticProvider) InvalidateIfCurrent(*session.Credential) bool { return false }
 
 func TestResolveUDPUsesUDPPolicy(t *testing.T) {
 	policy := &sdpc.Resource{IPRules: []sdpc.IPRule{

@@ -117,12 +117,12 @@ func TestRestoreSkipsDifferentClientType(t *testing.T) {
 				logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 				store:  store,
 			}
-			cred, err := p.restore(context.Background())
+			cred, session, err := p.restore(context.Background())
 			if err != nil {
 				t.Fatalf("restore returned error instead of skipping mismatched state: %v", err)
 			}
-			if cred != nil {
-				t.Fatalf("restore returned credential for mismatched state: %+v", cred)
+			if cred != nil || session != nil {
+				t.Fatalf("restore returned credential for mismatched state: %+v %+v", cred, session)
 			}
 		})
 	}
