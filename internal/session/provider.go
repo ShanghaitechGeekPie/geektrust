@@ -219,7 +219,7 @@ func (p *Provider) finishRefresh(call *refreshCall, cred *Credential, session *S
 			p.emit(Event{Kind: EventLoginSuccess, Session: session, Message: "会话已建立: " + session.DisplayName})
 		}
 	} else {
-		p.emit(Event{Kind: EventLoginFailed, Message: sanitizeErrorText(err.Error())})
+		p.emit(Event{Kind: EventLoginFailed, Message: SanitizeErrorText(err.Error())})
 	}
 	p.refreshing = nil
 	p.mu.Unlock()

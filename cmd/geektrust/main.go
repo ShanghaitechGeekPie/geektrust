@@ -25,6 +25,7 @@ import (
 	"geektrust/internal/resolver"
 	"geektrust/internal/session"
 	"geektrust/internal/tunnel"
+	"geektrust/internal/webui"
 )
 
 func main() {
@@ -116,9 +117,105 @@ func cmdLogin(ctx context.Context, cfg *config.Config, logger *slog.Logger, args
 }
 
 // cmdRun ensures a session, then runs the tunnel-backed SOCKS5/HTTP proxies
-// until interrupted.
+// until interrupted. When enabled, the web panel is assembled before the
+// first login so SMS verification can be completed in the browser; any panel
+// failure degrades to the terminal-only path without affecting the VPN.
 func cmdRun(ctx context.Context, cfg *config.Config, logger *slog.Logger, args []string) error {
-	provider := session.NewProvider(cfg, logger, smsPrompt)
+	if !cfg.WebEnabled() {
+		return runVPN(ctx, cfg, logger, session.NewProvider(cfg, logger, smsPrompt))
+	}
+	if webListenConflict(cfg) {
+		logger.Warn("web panel listen conflicts with an enabled inbound listener; panel disabled",
+			"listen", cfg.Web.Listen)
+		return runVPN(ctx, cfg, logger, session.NewProvider(cfg, logger, smsPrompt))
+	}
+	listener, err := net.Listen("tcp", cfg.Web.Listen)
+	if err != nil {
+		logger.Warn("web panel listen failed; panel disabled", "err", err)
+		return runVPN(ctx, cfg, logger, session.NewProvider(cfg, logger, smsPrompt))
+	}
+
+	hub := webui.NewHub(cfg)
+	broker := webui.NewBroker(hub.SetSMSPending)
+	provider := session.NewProvider(cfg, logger, nil)
+	provider.SetSMSHandler(broker)
+	provider.AddObserver(hub)
+	server := webui.NewServer(hub, broker, provider, cfg)
+	go func() { _ = server.Serve(listener) }()
+	defer func() {
+		// The run context may already be canceled here; use a fresh one.
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = server.Shutdown(shutdownCtx)
+	}()
+	logger.Info("web panel", "url", "http://"+cfg.Web.Listen)
+	return runVPN(ctx, cfg, logger, provider)
+}
+
+// webListenConflict reports whether the panel address collides with an
+// enabled proxy listener (the panel must never preempt the data plane).
+func webListenConflict(cfg *config.Config) bool {
+	for _, l := range []config.Listener{cfg.Inbound.SOCKS5, cfg.Inbound.HTTP} {
+		if l.Enabled && listenOverlap(cfg.Web.Listen, l.Listen) {
+			return true
+		}
+	}
+	return false
+}
+
+// listenOverlap compares two host:port addresses semantically: equal ports
+// (numeric comparison, so leading zeros cannot hide a collision) with equal
+// (after IP normalization), wildcard, or localhost-equivalent hosts overlap.
+// Web.Listen is canonicalized by config validation; inbound addresses are
+// not, so raw string equality is not enough.
+func listenOverlap(a, b string) bool {
+	hostA, portA, errA := net.SplitHostPort(a)
+	hostB, portB, errB := net.SplitHostPort(b)
+	if errA != nil || errB != nil || !portsEqual(portA, portB) {
+		return false
+	}
+	return hostsOverlap(hostA, hostB)
+}
+
+// portsEqual compares port strings the way net.Listen would: numeric
+// comparison (leading zeros cannot hide a collision), with service names
+// resolved via the system database (e.g. http-alt = 8080).
+func portsEqual(a, b string) bool {
+	if a == b {
+		return true
+	}
+	numA, errA := lookupPort(a)
+	numB, errB := lookupPort(b)
+	return errA == nil && errB == nil && numA == numB
+}
+
+func lookupPort(s string) (int, error) {
+	if n, err := strconv.Atoi(s); err == nil {
+		return n, nil
+	}
+	return net.LookupPort("tcp", s)
+}
+
+func hostsOverlap(a, b string) bool {
+	if a == b {
+		return true
+	}
+	ipA, ipB := listenIP(a), listenIP(b)
+	if ipA == nil || ipB == nil {
+		return false
+	}
+	return ipA.Equal(ipB) || ipA.IsUnspecified() || ipB.IsUnspecified()
+}
+
+func listenIP(host string) net.IP {
+	if host == "localhost" {
+		return net.ParseIP("127.0.0.1")
+	}
+	return net.ParseIP(host)
+}
+
+// runVPN establishes the session and serves the proxy listeners.
+func runVPN(ctx context.Context, cfg *config.Config, logger *slog.Logger, provider *session.Provider) error {
 	cred, err := provider.Credential(ctx)
 	if err != nil {
 		return err

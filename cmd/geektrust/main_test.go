@@ -537,6 +537,57 @@ exit 1
 	})
 }
 
+func TestWebListenConflict(t *testing.T) {
+	cfg := &config.Config{
+		Inbound: config.Inbound{
+			SOCKS5: config.Listener{Enabled: true, Listen: "127.0.0.1:1080"},
+			HTTP:   config.Listener{Enabled: true, Listen: "127.0.0.1:8081"},
+		},
+	}
+	cfg.Web.Listen = "127.0.0.1:8081"
+	if !webListenConflict(cfg) {
+		t.Error("enabled inbound HTTP on the panel address must conflict")
+	}
+	cfg.Web.Listen = "127.0.0.1:8080"
+	if webListenConflict(cfg) {
+		t.Error("distinct panel address reported as conflict")
+	}
+	cfg.Inbound.HTTP.Enabled = false
+	cfg.Web.Listen = "127.0.0.1:8081"
+	if webListenConflict(cfg) {
+		t.Error("disabled inbound listener reported as conflict")
+	}
+
+	// Equivalent spellings of the same loopback endpoint must conflict even
+	// though only Web.Listen is canonicalized by config validation.
+	cfg.Inbound.HTTP.Enabled = true
+	cfg.Inbound.HTTP.Listen = "[0:0:0:0:0:0:0:1]:8081"
+	cfg.Web.Listen = "[::1]:8081"
+	if !webListenConflict(cfg) {
+		t.Error("IPv6-equivalent inbound/panel addresses not detected")
+	}
+	cfg.Inbound.HTTP.Listen = "127.0.0.1:8081"
+	cfg.Web.Listen = "localhost:8081"
+	if !webListenConflict(cfg) {
+		t.Error("localhost/127.0.0.1 equivalence not detected")
+	}
+	cfg.Inbound.HTTP.Listen = "0.0.0.0:8081"
+	cfg.Web.Listen = "127.0.0.1:8081"
+	if !webListenConflict(cfg) {
+		t.Error("wildcard inbound on the panel port not detected")
+	}
+	cfg.Inbound.HTTP.Listen = "127.0.0.1:08081"
+	if !webListenConflict(cfg) {
+		t.Error("leading-zero port equivalent not detected")
+	}
+	// Service names resolve via the system database exactly as net.Listen
+	// resolves them; "http" is universally 80 (http-alt is 591 here, 8080
+	// on Linux, so it is not a stable fixture).
+	if !listenOverlap("127.0.0.1:http", "127.0.0.1:80") {
+		t.Error("service-name port (http=80) not detected")
+	}
+}
+
 func TestCmdInitHelp(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.toml")
 	if err := cmdInit(context.Background(), path, []string{"--help"}); err != nil {

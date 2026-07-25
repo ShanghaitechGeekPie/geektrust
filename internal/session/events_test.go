@@ -88,16 +88,16 @@ func TestSanitizeErrorText(t *testing.T) {
 		{"plain error without secrets", "plain error without secrets"},
 	}
 	for _, tt := range cases {
-		if got := sanitizeErrorText(tt.in); got != tt.want {
+		if got := SanitizeErrorText(tt.in); got != tt.want {
 			t.Errorf("sanitize(%q) = %q, want %q", tt.in, got, tt.want)
 		}
 	}
 	long := strings.Repeat("a", 400)
-	if got := sanitizeErrorText(long); len([]rune(got)) != 300 {
+	if got := SanitizeErrorText(long); len([]rune(got)) != 300 {
 		t.Errorf("truncated rune count = %d, want 300", len([]rune(got)))
 	}
 	wide := strings.Repeat("界", 400)
-	got := sanitizeErrorText(wide)
+	got := SanitizeErrorText(wide)
 	if len([]rune(got)) != 300 || !strings.HasSuffix(got, "…") {
 		t.Errorf("multibyte truncation broke UTF-8 or length: %d runes", len([]rune(got)))
 	}

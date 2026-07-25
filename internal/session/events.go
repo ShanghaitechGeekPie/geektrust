@@ -36,7 +36,7 @@ type SessionInfo struct {
 type Event struct {
 	Kind    EventKind
 	Time    time.Time
-	Message string // sanitized, see sanitizeErrorText
+	Message string // sanitized, see SanitizeErrorText
 	Session *SessionInfo
 	// Dropped is the dispatcher's cumulative drop count before this event,
 	// stamped at dequeue time.
@@ -72,11 +72,11 @@ func newSessionInfo(info *sdpc.OnlineInfo, cred *Credential, clientType string) 
 // The CAS chain can put ?ticket=ST-... into wrapped network errors.
 var sensitiveParamRE = regexp.MustCompile(`(?i)([?&](?:ticket|sid|code|password)=)[^&\s"']+`)
 
-// sanitizeErrorText redacts credential-bearing URL parameters and truncates
+// SanitizeErrorText redacts credential-bearing URL parameters and truncates
 // the message to at most 300 runes (ellipsis included) before it enters
 // events or API responses. Truncation is rune-based so multi-byte UTF-8 is
 // never split.
-func sanitizeErrorText(s string) string {
+func SanitizeErrorText(s string) string {
 	s = sensitiveParamRE.ReplaceAllString(s, "${1}***")
 	const maxRunes = 300
 	if r := []rune(s); len(r) > maxRunes {
