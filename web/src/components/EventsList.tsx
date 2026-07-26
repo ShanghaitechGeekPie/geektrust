@@ -1,3 +1,4 @@
+import { friendlyError } from "../errors";
 import type { HistoryEvent } from "../types";
 
 const KIND_LABEL: Record<string, string> = {
@@ -10,9 +11,15 @@ const KIND_LABEL: Record<string, string> = {
 
 function formatTime(ts: string): string {
   const d = new Date(ts);
-  return Number.isNaN(d.getTime())
-    ? ts
-    : d.toLocaleTimeString("zh-CN", { hour12: false });
+  if (Number.isNaN(d.getTime())) return ts;
+  return d.toLocaleString("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  });
 }
 
 export function EventsList({ events, dropped }: { events: HistoryEvent[]; dropped: number }) {
@@ -24,13 +31,21 @@ export function EventsList({ events, dropped }: { events: HistoryEvent[]; droppe
         <p className="muted">暂无事件</p>
       ) : (
         <ul className="events">
-          {[...events].reverse().map((ev, i) => (
-            <li key={`${ev.ts}-${i}`}>
-              <span className="mono muted">{formatTime(ev.ts)}</span>
-              <span className={`tag kind-${ev.kind}`}>{KIND_LABEL[ev.kind] ?? ev.kind}</span>
-              <span>{ev.message}</span>
-            </li>
-          ))}
+          {[...events].reverse().map((ev, i) => {
+            // Only login_failed carries a wrapped Go error chain; every other
+            // kind is already a plain sentence that must not be rewritten.
+            const text =
+              ev.kind === "login_failed" ? friendlyError(ev.message).summary : ev.message;
+            return (
+              <li key={`${ev.ts}-${events.length - i}`}>
+                <span className="mono muted ev-time">{formatTime(ev.ts)}</span>
+                <span className={`tag kind-${ev.kind}`}>{KIND_LABEL[ev.kind] ?? ev.kind}</span>
+                <span className="ev-msg" title={text === ev.message ? undefined : ev.message}>
+                  {text}
+                </span>
+              </li>
+            );
+          })}
         </ul>
       )}
     </section>

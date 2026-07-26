@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
@@ -141,7 +142,13 @@ func cmdRun(ctx context.Context, cfg *config.Config, logger *slog.Logger, args [
 	provider.SetSMSHandler(broker)
 	provider.AddObserver(hub)
 	server := webui.NewServer(hub, broker, provider, cfg)
-	go func() { _ = server.Serve(listener) }()
+	go func() {
+		// A panel failure must never affect the VPN; surface it in the log
+		// instead of dying silently.
+		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			logger.Warn("web panel server stopped unexpectedly", "err", err)
+		}
+	}()
 	defer func() {
 		// The run context may already be canceled here; use a fresh one.
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

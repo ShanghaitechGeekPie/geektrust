@@ -43,12 +43,14 @@ export interface TrustDeviceEntry {
   osVersion?: string;
   lastLoginIp?: string;
   lastLoginAddress?: string;
-  networkZoneList?: string[];
+  networkZoneList?: string[] | null;
   onlineStatus?: boolean;
 }
 
 export interface TrustDeviceList {
-  data: TrustDeviceEntry[];
+  // Go marshals a nil slice as null, e.g. for an account with no trusted
+  // terminals — consumers must not assume an array.
+  data: TrustDeviceEntry[] | null;
   selfId: string;
   currentTrustStatus: number;
   trustDeviceConfig: { enable: boolean };

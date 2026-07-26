@@ -81,6 +81,10 @@ func NewServer(hub *Hub, broker *Broker, provider ProviderAPI, cfg *config.Confi
 	// with the broader "/api/" fallback in http.ServeMux.
 	mux.HandleFunc("/", s.handleStatic)
 	s.http = &http.Server{Handler: s.secure(mux)}
+	// SSE streams never go idle, so a graceful Shutdown would always wait
+	// out its whole timeout while a panel tab is open. Closing the hub's
+	// subscribers makes every event handler return promptly.
+	s.http.RegisterOnShutdown(hub.CloseSubscribers)
 	return s
 }
 
@@ -89,9 +93,15 @@ func (s *Server) Serve(listener net.Listener) error {
 	return s.http.Serve(listener)
 }
 
-// Shutdown gracefully stops the server.
+// Shutdown gracefully stops the server; connections that outlive ctx (e.g.
+// a client that stopped reading mid-response) are hard-closed instead of
+// leaked past the deadline.
 func (s *Server) Shutdown(ctx context.Context) error {
-	return s.http.Shutdown(ctx)
+	err := s.http.Shutdown(ctx)
+	if err != nil {
+		s.http.Close()
+	}
+	return err
 }
 
 // secure applies the panel's browser-attack defenses on every response:
@@ -108,6 +118,8 @@ func (s *Server) secure(next http.Handler) http.Handler {
 			return
 		}
 		if r.Method == http.MethodPost {
+			// All legitimate request bodies are tiny JSON documents.
+			r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
 			if origin := r.Header.Get("Origin"); origin != "" {
 				u, err := url.Parse(origin)
 				if err != nil || u.Host != s.cfg.Web.Listen {
@@ -143,6 +155,7 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
 	w.Write(s.hub.Snapshot())
 }
 
@@ -322,6 +335,11 @@ func (s *Server) handleTrustLogout(w http.ResponseWriter, r *http.Request) {
 
 // handleStatic serves the embedded frontend (with SPA fallback) or the
 // placeholder page when the frontend has not been built. GET/HEAD only.
+//
+// Cache rules keep rebuilds sane: Vite asset filenames are content-hashed,
+// so /assets/* is immutable, while index.html must always revalidate — a
+// cached shell referencing purged hashes would otherwise blank the panel
+// after every rebuild.
 func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -336,11 +354,21 @@ func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
 	if path == "" {
 		path = "index.html"
 	}
-	if f, err := s.dist.Open(path); err == nil {
-		f.Close()
-	} else {
-		// SPA fallback: unknown paths get the app shell.
+	if info, err := fs.Stat(s.dist, path); err != nil || info.IsDir() {
+		// A missing hashed asset must be a hard 404: serving the SPA shell
+		// as JS/CSS would hand the browser HTML under a script MIME type.
+		if strings.HasPrefix(path, "assets/") {
+			http.NotFound(w, r)
+			return
+		}
+		// SPA fallback: unknown paths and directories get the app shell.
 		r.URL.Path = "/"
+		path = "index.html"
+	}
+	if strings.HasPrefix(path, "assets/") {
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	} else {
+		w.Header().Set("Cache-Control", "no-cache")
 	}
 	http.FileServerFS(s.dist).ServeHTTP(w, r)
 }

@@ -1,21 +1,22 @@
-import { useState } from "react";
-import { post, ApiError, useSnapshot } from "./api";
-import { StatusCard, UserCard } from "./components/StatusCard";
+import { useEffect, useState } from "react";
+import { post, errorText, usePanelStore } from "./api";
+import { StatusCard, stateMeta } from "./components/StatusCard";
+import { UserCard } from "./components/UserCard";
 import { SmsDialog } from "./components/SmsDialog";
 import { TrustDevices } from "./components/TrustDevices";
 import { EventsList } from "./components/EventsList";
 
-const STATE_TITLE: Record<string, string> = {
-  online: "在线",
-  connecting: "连接中",
-  sms_required: "需要短信验证",
-  offline: "离线",
-};
-
 export default function App() {
-  const snap = useSnapshot();
+  const { snap, connected } = usePanelStore();
   const [reloginBusy, setReloginBusy] = useState(false);
   const [reloginError, setReloginError] = useState<string | null>(null);
+
+  // Any panel state change (relogin accepted, another login finished)
+  // supersedes a stale relogin error.
+  const state = snap?.state;
+  useEffect(() => {
+    setReloginError(null);
+  }, [state]);
 
   const relogin = async () => {
     if (!window.confirm("确定重新登录?当前会话会被注销,可能需要重新短信验证。")) return;
@@ -23,12 +24,11 @@ export default function App() {
     setReloginError(null);
     try {
       await post("/api/relogin", {});
+      // 202:后续进度经 SSE 推送(connecting → online/offline)。
     } catch (err) {
-      if (err instanceof ApiError && err.status === 409) {
-        setReloginError("登录正在进行中");
-      } else {
-        setReloginError(err instanceof ApiError ? err.message : "重登失败");
-      }
+      setReloginError(
+        errorText(err, "重新登录失败", { 409: "已有登录正在进行,请等待其完成" }),
+      );
     } finally {
       setReloginBusy(false);
     }
@@ -37,25 +37,46 @@ export default function App() {
   if (!snap) {
     return (
       <main className="page">
-        <p className="muted">正在连接面板服务…</p>
+        <div className="card boot">
+          <h1>geekTrust 面板</h1>
+          {connected ? (
+            <p className="muted">正在加载状态…</p>
+          ) : (
+            <>
+              <p className="error-text">无法连接面板服务,正在自动重试…</p>
+              <p className="muted">
+                请确认 <code>geektrust run</code> 正在运行,且面板地址与配置中的 <code>web.listen</code> 一致。
+              </p>
+            </>
+          )}
+        </div>
       </main>
     );
   }
 
+  const meta = stateMeta(snap.state, !connected);
   return (
     <main className="page">
       <header className="top">
         <h1>geekTrust 面板</h1>
-        <span className={`pill ${snap.state === "online" ? "ok" : snap.state === "offline" ? "idle" : "warn"}`}>
-          {STATE_TITLE[snap.state] ?? snap.state}
-        </span>
+        <span className={meta.className}>{meta.label}</span>
       </header>
-      {reloginError && <p className="error-text">重新登录失败:{reloginError}</p>}
+      {!connected && (
+        <div className="banner" role="alert">
+          已失去与 geekTrust 进程的连接,以下显示的是最后已知状态;正在自动重连…
+        </div>
+      )}
       <div className="grid">
-        <StatusCard snap={snap} onRelogin={relogin} reloginBusy={reloginBusy} />
+        <StatusCard
+          snap={snap}
+          connected={connected}
+          onRelogin={relogin}
+          reloginBusy={reloginBusy}
+          reloginError={reloginError}
+        />
         <UserCard snap={snap} />
       </div>
-      <TrustDevices snap={snap} />
+      <TrustDevices snap={snap} connected={connected} />
       <EventsList events={snap.events} dropped={snap.events_dropped} />
       <SmsDialog snap={snap} />
     </main>

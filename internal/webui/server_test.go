@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -482,5 +483,114 @@ func TestStaticServesBuiltFrontend(t *testing.T) {
 	resp = doJSON(t, srv.Client(), "GET", srv.URL+"/some/route", "", nil)
 	if body := readBody(t, resp); resp.StatusCode != 200 || !strings.Contains(body, `id="root"`) {
 		t.Errorf("SPA fallback = %d", resp.StatusCode)
+	}
+}
+
+// TestShutdownWithOpenEventStream is the regression test for the 5-second
+// exit hang: SSE handlers never go idle on their own, so Shutdown must
+// actively close the hub's subscribers to finish before its deadline.
+func TestShutdownWithOpenEventStream(t *testing.T) {
+	fp := &fakeProvider{}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := testConfig("client")
+	cfg.Web.Listen = listener.Addr().String()
+	hub := NewHub(cfg)
+	server := NewServer(hub, NewBroker(hub.SetSMSPending), fp, cfg)
+	served := make(chan error, 1)
+	go func() { served <- server.Serve(listener) }()
+
+	resp := doJSON(t, &http.Client{}, "GET", "http://"+cfg.Web.Listen+"/api/events", "", nil)
+	defer resp.Body.Close()
+	if _, err := bufio.NewReader(resp.Body).ReadString('\n'); err != nil {
+		t.Fatalf("reading first SSE line: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	start := time.Now()
+	if err := server.Shutdown(ctx); err != nil {
+		t.Fatalf("Shutdown = %v after %v; the SSE stream kept the server alive", err, time.Since(start))
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Errorf("Shutdown took %v, want prompt teardown", elapsed)
+	}
+	if err := <-served; !errors.Is(err, http.ErrServerClosed) {
+		t.Errorf("Serve returned %v, want ErrServerClosed", err)
+	}
+
+	// Post-shutdown subscribers get a pre-closed channel, never a hang.
+	ch, _, cancelSub := hub.Subscribe()
+	defer cancelSub()
+	if _, ok := <-ch; ok {
+		t.Error("Subscribe after CloseSubscribers returned a live channel")
+	}
+}
+
+func TestStatusCacheControlNoStore(t *testing.T) {
+	srv, _, _ := newPanelTestServer(t, "client", &fakeProvider{})
+	resp := doJSON(t, srv.Client(), "GET", srv.URL+"/api/status", "", nil)
+	resp.Body.Close()
+	if got := resp.Header.Get("Cache-Control"); got != "no-store" {
+		t.Errorf("Cache-Control = %q, want no-store", got)
+	}
+}
+
+func TestPostBodyTooLargeRejected(t *testing.T) {
+	srv, _, _ := newPanelTestServer(t, "client", &fakeProvider{})
+	huge := `{"code":"` + strings.Repeat("1", 128<<10) + `","gen":1}`
+	resp := doJSON(t, srv.Client(), "POST", srv.URL+"/api/sms", huge, jsonHeaders)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("oversized POST = %d, want 400", resp.StatusCode)
+	}
+}
+
+// TestStaticAssetCachingAndMissing pins the rebuild-safety contract: hashed
+// assets are immutable, the shell always revalidates, and a purged asset is
+// a hard 404 instead of HTML masquerading as JavaScript. Skips on clean
+// checkouts without a built frontend.
+func TestStaticAssetCachingAndMissing(t *testing.T) {
+	fp := &fakeProvider{}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := testConfig("client")
+	cfg.Web.Listen = listener.Addr().String()
+	hub := NewHub(cfg)
+	server := NewServer(hub, NewBroker(hub.SetSMSPending), fp, cfg)
+	if !server.hasUI {
+		t.Skip("frontend not built; run make web")
+	}
+	srv := httptest.NewUnstartedServer(server.http.Handler)
+	srv.Listener = listener
+	srv.Start()
+	defer srv.Close()
+
+	resp := doJSON(t, srv.Client(), "GET", srv.URL+"/", "", nil)
+	body := readBody(t, resp)
+	if got := resp.Header.Get("Cache-Control"); got != "no-cache" {
+		t.Errorf("index Cache-Control = %q, want no-cache", got)
+	}
+	asset := strings.TrimPrefix(strings.TrimSpace(strings.Split(strings.Split(body, "src=")[1], "\"")[1]), "/")
+	resp = doJSON(t, srv.Client(), "GET", srv.URL+"/"+asset, "", nil)
+	resp.Body.Close()
+	if got := resp.Header.Get("Cache-Control"); !strings.Contains(got, "immutable") {
+		t.Errorf("asset Cache-Control = %q, want immutable", got)
+	}
+
+	resp = doJSON(t, srv.Client(), "GET", srv.URL+"/assets/index-ZZZZZZZZ.js", "", nil)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("missing asset = %d, want 404", resp.StatusCode)
+	}
+
+	// Directory paths fall back to the shell instead of a listing.
+	resp = doJSON(t, srv.Client(), "GET", srv.URL+"/assets", "", nil)
+	if body := readBody(t, resp); resp.StatusCode != 200 || !strings.Contains(body, `id="root"`) {
+		t.Errorf("directory path = %d, want SPA shell", resp.StatusCode)
 	}
 }

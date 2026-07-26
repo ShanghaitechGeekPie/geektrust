@@ -82,7 +82,8 @@ type Hub struct {
 	events    []HistoryEvent
 	dropped   uint64
 
-	subs map[chan []byte]struct{}
+	subs   map[chan []byte]struct{}
+	closed bool // server shutting down: refuse new subscribers
 }
 
 // NewHub builds a Hub carrying the static configuration fields.
@@ -240,8 +241,15 @@ func (h *Hub) Snapshot() []byte {
 func (h *Hub) Subscribe() (ch chan []byte, initial []byte, cancel func()) {
 	ch = make(chan []byte, 8)
 	h.mu.Lock()
-	h.subs[ch] = struct{}{}
 	data, _ := json.Marshal(h.snapshotLocked())
+	if h.closed {
+		// Shutting down: hand out a pre-closed channel so the SSE handler
+		// sends the final snapshot and returns immediately.
+		close(ch)
+		h.mu.Unlock()
+		return ch, data, func() {}
+	}
+	h.subs[ch] = struct{}{}
 	h.mu.Unlock()
 	cancel = func() {
 		h.mu.Lock()
@@ -252,4 +260,18 @@ func (h *Hub) Subscribe() (ch chan []byte, initial []byte, cancel func()) {
 		h.mu.Unlock()
 	}
 	return ch, data, cancel
+}
+
+// CloseSubscribers tears down every SSE stream and refuses new ones. Wired
+// to http.Server.RegisterOnShutdown: event streams never go idle on their
+// own, so without this every Shutdown waits out its entire timeout while a
+// panel tab is open.
+func (h *Hub) CloseSubscribers() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.closed = true
+	for ch := range h.subs {
+		delete(h.subs, ch)
+		close(ch)
+	}
 }

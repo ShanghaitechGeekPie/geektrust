@@ -473,19 +473,29 @@ webui 的 trust-device/relogin handler 依赖一个窄接口（`ActiveSDPC`、`T
 web/
   package.json  package-lock.json  tsconfig.json  vite.config.ts  index.html
   src/
-    main.tsx  App.tsx  api.ts  types.ts  styles.css
+    main.tsx  App.tsx  api.ts  types.ts  errors.ts  styles.css
     components/
       StatusCard.tsx   状态灯 + since + last_error
       UserCard.tsx     用户信息 + device_id(复制按钮) + client_type + 代理入口
       SmsDialog.tsx    弹窗:6 位输入、60s 倒计时、重新发送、错误内联
-      TrustDevices.tsx 表格 + 绑定/取消授信/注销;browser 模式显示禁用说明
+      TrustDevices.tsx 表格 + 绑定/取消授信/注销;browser 模式仅禁用「绑定本机」
       EventsList.tsx   最近事件流(新→旧)
+      ErrorText.tsx    错误摘要 + 「详情」展开原始错误链
 ```
 
 - `package-lock.json` 提交到 git（`npm ci` 可重现构建）。
 - 数据层 `api.ts`：fetch + `EventSource`；单例 store（`useSyncExternalStore`），不引入状态库。
-- 无路由，单页。UI 文案中文。样式手写 CSS（约 200 行），深浅色按 `prefers-color-scheme`。
+- 无路由，单页。UI 文案中文。样式手写 CSS（约 250 行），深浅色按 `prefers-color-scheme`。
 - 短信弹窗：`state === "sms_required"` 时自动弹出、输入框自动聚焦；提交时携带当前 `sms_gen`；提交后进入"验证中"等待状态推送；60 秒倒计时仅作提示（客户端计时）。
+- 错误展示 `errors.ts`：后端传来的是 Go 错误链（`check sms code: sdpc checkSms: code 75500403: 验证码错误`），
+  直接渲染会让面板显得像坏了。`friendlyError()` 依次尝试：§11.1 控制面错误码表 → 网络/TLS 特征 →
+  错误链尾部的中文片段，得到一行可行动的中文；原文经 `ErrorText` 的「详情」按钮展开，排障信息不丢。
+  未收录的错误码（如 75500403）不臆造语义，直接采用控制器自己的中文消息。
+- 连接断开时状态灯置灰并停止呼吸动画（`.pill.stale`）：快照已不再刷新，绿灯不能继续冒充实时。
+- 授信终端在 browser 模式下**不整卡禁用**：服务端只拒绝绑定（`handleTrustBind` 的 `client_type` 前置检查，
+  对应控制器 75500000），查询/取消授信/注销在任何会话都可用。实测 browser 会话 `GET /api/trust-devices`
+  返回 200 且 `selfId` 就在列表里——纯 web 登录同样会被记为授信终端。因此只禁用「绑定当前设备」按钮，
+  列表照常渲染;否则用户既看不到自己已授信，也无法注销其他设备。
 
 ### 9.2 构建与 dev 代理
 
