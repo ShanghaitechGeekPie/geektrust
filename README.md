@@ -205,6 +205,25 @@ SOCKS5 入口按 RFC 1928 支持 `UDP ASSOCIATE`。HTTP/1.1 入口按 RFC 9298 �
 - 代理数据面只支持 IPv4 目标。网关接入线路可以使用 IPv6。
 - 隧道 MTU 为 1400，UDP payload 上限为 1372 字节。需要 IP 分片的超大数据报会按相应代理协议的要求丢弃。
 
+## GitHub Actions
+
+GitHub Actions 推送匹配 `v*` 的 tag 会创建 GitHub Release。
+
+- Linux: amd64、arm64
+- macOS: amd64、arm64
+- Windows: amd64、arm64
+
+本地生成相同构件：
+
+```sh
+bash scripts/package-release.sh v0.1.0 dist
+# with uv
+bash scripts/package-release-uv.sh v0.1.0 dist
+```
+
+输出目录必须为空。每个压缩包包含完整 Web 面板、`config.example.toml`
+和 README，同时生成 `SHA256SUMS`。
+
 ## 鸣谢
 
 - [shanghaitech-ids-passkey](https://github.com/vvbbnn00/shanghaitech-ids-passkey)：IDS passkey 登录和浏览器绑定流程。geekTrust 的 `internal/idsauth` 与其 keystore 格式兼容。
