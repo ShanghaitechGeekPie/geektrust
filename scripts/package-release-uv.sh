@@ -43,8 +43,8 @@ base_output="$package_tmp/base"
 downloads="$package_tmp/downloads"
 mkdir -p "$base_output" "$downloads"
 
-# Build the normal packages first. This keeps the target list and Go build
-# flags in package-release.sh, which is also what CI invokes.
+# Build the base packages first so Go build flags stay in package-release.sh.
+# Keep the target list below in sync with that script.
 bash scripts/package-release.sh "$version" "$base_output"
 
 uv_release_url="https://releases.astral.sh/github/uv/releases/download/$uv_version"
