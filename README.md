@@ -207,7 +207,8 @@ SOCKS5 入口按 RFC 1928 支持 `UDP ASSOCIATE`。HTTP/1.1 入口按 RFC 9298 �
 
 ## GitHub Actions
 
-GitHub Actions 推送匹配 `v*` 的 tag 会创建 GitHub Release。
+GitHub Actions 会在 pull request 和手动运行时构建、测试发布构件；推送匹配
+`v*` 的 tag 时，通过相同验证后创建 GitHub Release。
 
 - Linux: amd64、arm64
 - macOS: amd64、arm64
