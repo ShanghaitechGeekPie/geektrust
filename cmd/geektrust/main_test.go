@@ -10,6 +10,21 @@ import (
 	"geektrust/internal/config"
 )
 
+func TestBuildVersion(t *testing.T) {
+	original := version
+	t.Cleanup(func() { version = original })
+
+	version = "v1.2.3-rc.1"
+	if got := buildVersion(); got != "v1.2.3-rc.1" {
+		t.Fatalf("buildVersion() = %q, want v1.2.3-rc.1", got)
+	}
+
+	version = ""
+	if got := buildVersion(); got != "dev" {
+		t.Fatalf("empty buildVersion() = %q, want dev", got)
+	}
+}
+
 func TestValidateTrustDeviceArgs(t *testing.T) {
 	clientCfg := &config.Config{ClientType: "client"}
 	browserCfg := &config.Config{ClientType: "browser"}

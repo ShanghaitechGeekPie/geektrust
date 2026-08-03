@@ -29,19 +29,37 @@ import (
 	"geektrust/internal/webui"
 )
 
+// version is replaced by scripts/package-release.sh through the Go linker.
+// Direct development builds keep the explicit "dev" value.
+var version = "dev"
+
 func main() {
 	var configPath string
+	var showVersion bool
 	flag.StringVar(&configPath, "config", "config.toml", "path to the TOML config file")
+	flag.BoolVar(&showVersion, "version", false, "print version and exit")
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: geektrust [-config config.toml] <command>\n\nCommands:\n  init              generate a client-mode config and unique device ID\n  run               ensure a session, then start the SOCKS5/HTTP proxies (default)\n  login             establish a VPN session (passkey; SMS when required)\n  dial <host[:port]>  connect through the tunnel (TLS handshake on :443)\n  trust-device <sub>  manage trusted terminals (list | bind | unbind <id> | logout <id>)\n")
+		fmt.Fprintf(os.Stderr, "Usage: geektrust [-config config.toml] <command>\n\nCommands:\n  version           print the version embedded at build time\n  init              generate a client-mode config and unique device ID\n  run               ensure a session, then start the SOCKS5/HTTP proxies (default)\n  login             establish a VPN session (passkey; SMS when required)\n  dial <host[:port]>  connect through the tunnel (TLS handshake on :443)\n  trust-device <sub>  manage trusted terminals (list | bind | unbind <id> | logout <id>)\n")
 		flag.PrintDefaults()
 	}
 	flag.Parse()
+	if showVersion {
+		fmt.Printf("geektrust %s\n", buildVersion())
+		return
+	}
 
 	cmd := "run"
 	args := flag.Args()
 	if len(args) > 0 {
 		cmd, args = args[0], args[1:]
+	}
+	if cmd == "version" {
+		if len(args) != 0 {
+			fmt.Fprintln(os.Stderr, "usage: geektrust version")
+			os.Exit(2)
+		}
+		fmt.Printf("geektrust %s\n", buildVersion())
+		return
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -79,6 +97,14 @@ func main() {
 		logger.Error("command failed", "command", cmd, "err", err)
 		os.Exit(1)
 	}
+}
+
+func buildVersion() string {
+	v := strings.TrimSpace(version)
+	if v == "" {
+		return "dev"
+	}
+	return v
 }
 
 func newLogger(level string) *slog.Logger {

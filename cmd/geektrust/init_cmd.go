@@ -223,6 +223,21 @@ func bindPasskeyKeystore(ctx context.Context, uvx, destination string) error {
 	return nil
 }
 
+func findUVX() (string, error) {
+	executable, executableErr := os.Executable()
+	if executableErr == nil {
+		name := "uvx"
+		if strings.EqualFold(filepath.Ext(executable), ".exe") {
+			name += ".exe"
+		}
+		bundled := filepath.Join(filepath.Dir(executable), name)
+		if info, err := os.Stat(bundled); err == nil && info.Mode().IsRegular() {
+			return bundled, nil
+		}
+	}
+	return exec.LookPath("uvx")
+}
+
 func cmdInit(ctx context.Context, configPath string, args []string) error {
 	fs := flag.NewFlagSet("init", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
@@ -280,7 +295,7 @@ func cmdInit(ctx context.Context, configPath string, args []string) error {
 	}
 
 	if *bindPasskey && !keystoreExists {
-		uvx, err := exec.LookPath("uvx")
+		uvx, err := findUVX()
 		if err != nil {
 			return fmt.Errorf("uvx is not installed; install uv first or omit --bind-passkey")
 		}

@@ -156,6 +156,9 @@ listen = "127.0.0.1:8081"
 ## 常用命令
 
 ```sh
+# 查看构建时写入的版本号
+./geektrust version
+
 # 登录或恢复会话
 ./geektrust -config config.toml login
 
@@ -204,6 +207,37 @@ SOCKS5 入口按 RFC 1928 支持 `UDP ASSOCIATE`。HTTP/1.1 入口按 RFC 9298 �
 
 - 代理数据面只支持 IPv4 目标。网关接入线路可以使用 IPv6。
 - 隧道 MTU 为 1400，UDP payload 上限为 1372 字节。需要 IP 分片的超大数据报会按相应代理协议的要求丢弃。
+
+## GitHub Actions
+
+GitHub Actions 会在 pull request 和手动运行时构建、测试发布构件；推送匹配
+`v*` 的 tag 时，通过相同验证后创建 GitHub Release。
+
+- Linux: amd64、arm64
+- macOS: amd64、arm64
+- Windows: amd64、arm64
+
+本地生成相同构件：
+
+```sh
+bash scripts/package-release.sh v0.1.0 dist
+# with uv
+bash scripts/package-release-uv.sh v0.1.0 dist
+```
+
+发布版本使用 `vMAJOR.MINOR.PATCH` 格式，例如 `v0.1.0`。预发布版本可使用
+`v0.1.0-rc.1`。发布脚本会把这个完整版本号同时写入压缩包名称和二进制，解压后可用
+`geektrust version` 或 `geektrust --version` 查看。
+
+从准备发布的提交创建并推送标签：
+
+```sh
+git tag -a v0.1.0 -m "v0.1.0"
+git push origin v0.1.0
+```
+
+输出目录必须为空。每个压缩包包含完整 Web 面板、`config.example.toml`
+和 README，同时生成 `SHA256SUMS`。
 
 ## 鸣谢
 
