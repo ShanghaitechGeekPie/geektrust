@@ -56,7 +56,7 @@ for target in "${targets[@]}"; do
 
   mkdir -p "$package_dir"
   CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
-    go build -trimpath -buildvcs=true -ldflags="-s -w" \
+    go build -trimpath -buildvcs=true -ldflags="-s -w -X main.version=$version" \
     -o "$package_dir/$binary" ./cmd/geektrust
   cp README.md config.example.toml "$package_dir/"
 
