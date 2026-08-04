@@ -42,6 +42,18 @@ func (d *Dialer) Dial(ctx context.Context, ip string, port int, appID, domain st
 	if err := validateTarget(ip, port); err != nil {
 		return nil, err
 	}
+	conn, err := d.Manager.DialTCP(ctx, ip, port, appID, domain)
+	if err == nil {
+		return conn, nil
+	}
+	if !tunnel.ShouldFallbackToL3(err) {
+		return nil, fmt.Errorf("dial %s:%d through direct TCP tunnel: %w", ip, port, err)
+	}
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	d.Logger.Warn("direct TCP tunnel unavailable; falling back to L3",
+		"ip", ip, "port", port, "err", err)
 	return d.dialWithRetry(ctx, "tcp", ip, port, func() (net.Conn, error) {
 		return d.dialOnce(ctx, ip, port, appID, domain)
 	})

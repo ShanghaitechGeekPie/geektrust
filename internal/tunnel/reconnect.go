@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -27,6 +28,11 @@ type Manager struct {
 	linesMu  sync.Mutex
 	lines    *Lines
 	gateways []string
+	directMu sync.Mutex
+	// directLines keeps line health per node-group gateway set. Direct TCP
+	// connections are short-lived, so retaining the winning line avoids a
+	// fresh multi-line race for every proxied connection.
+	directLines map[string]*Lines
 
 	mu         sync.Mutex
 	cur        *Tunnel
@@ -103,8 +109,8 @@ func (m *Manager) SwitchLine() {
 	if m.lines != nil {
 		m.lines.Rotate()
 		if t != nil {
-			// Cool the failed line down so the next Best() actually picks
-			// another gateway instead of the same fastest one.
+			// Cool the failed line down so the next TLS race starts with
+			// another gateway.
 			m.lines.ReportFailure(t.Addr())
 		}
 	}
@@ -154,31 +160,38 @@ func (m *Manager) connect(ctx context.Context) (*Tunnel, error) {
 				rejectSID = cred.SID
 			}
 			lines := m.ensureLines(cred.Gateways)
-			addr, err := lines.Best(ctx)
+			conn, addr, err := lines.DialTLS(ctx)
 			if err != nil {
-				return nil, err // empty line pool: configuration error
-			}
-			t, err := Dial(ctx, addr, cred.SID, m.logger)
-			if err == nil {
-				return t, nil
-			}
-			m.logger.Warn("tunnel connect failed", "addr", addr, "err", err)
-			if ctx.Err() != nil {
-				// Caller cancellation is not the line's fault.
-				return nil, ctx.Err()
-			}
-			lines.ReportFailure(addr)
-			tried[addr] = true
+				if errors.Is(err, ErrNoLines) {
+					return nil, err // empty line pool: configuration error
+				}
+				if ctx.Err() != nil {
+					return nil, ctx.Err()
+				}
+				m.logger.Warn("gateway TLS connection failed", "err", err)
+			} else {
+				t, err := authenticateTunnel(ctx, conn, addr, cred.SID, m.logger)
+				if err == nil {
+					return t, nil
+				}
+				m.logger.Warn("tunnel authentication failed", "addr", addr, "err", err)
+				if ctx.Err() != nil {
+					// Caller cancellation is not the line's fault.
+					return nil, ctx.Err()
+				}
+				lines.ReportFailure(addr)
+				tried[addr] = true
 
-			var authErr *frame.TunnelAuthError
-			if errors.As(err, &authErr) {
-				if authErr.ShouldSwitchLine() {
-					lines.Rotate()
-				} else {
-					authRejects[addr] = authErr.Code
+				var authErr *frame.TunnelAuthError
+				if errors.As(err, &authErr) {
+					if authErr.ShouldSwitchLine() {
+						lines.Rotate()
+					} else {
+						authRejects[addr] = authErr.Code
+					}
 				}
 			}
-			if len(tried) >= len(cred.Gateways) && len(authRejects) > 0 {
+			if len(authRejects) > 0 && lines.allLinesTried(tried) {
 				m.logger.Warn("tunnel auth rejected on every reachable line; re-logging in",
 					"rejects", len(authRejects))
 				// Only drop the credential we actually used: a concurrent
@@ -214,6 +227,19 @@ func (m *Manager) ensureLines(gateways []string) *Lines {
 		m.logger.Debug("gateway line pool updated", "lines", gateways)
 	}
 	return m.lines
+}
+
+func (m *Manager) ensureDirectLines(gateways []string) *Lines {
+	key := strings.Join(gateways, "\x00")
+	m.directMu.Lock()
+	defer m.directMu.Unlock()
+	if m.directLines == nil {
+		m.directLines = make(map[string]*Lines)
+	}
+	if m.directLines[key] == nil {
+		m.directLines[key] = NewLines(gateways)
+	}
+	return m.directLines[key]
 }
 
 // Lines returns the current ordered gateway line list (diagnostics).

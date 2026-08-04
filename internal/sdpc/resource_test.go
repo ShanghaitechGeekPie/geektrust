@@ -16,6 +16,7 @@ const sampleResource = `{
             "apps": [
               {
                 "id": "681165d0-1c77-11ed-8650-cd35a51aa42a",
+                "nodeGroupId": "2eb64590-0f24-11ed-8ff1-d9356cf2043a",
                 "name": "电子资源",
                 "addressList": [
                   {"protocol": "tcp", "port": "443", "host": "10.15.45.163"},
@@ -247,9 +248,34 @@ func TestGatewaysAndDNS(t *testing.T) {
 			t.Errorf("gateways[%d] = %q, want %q", i, res.Gateways[i], wantGW[i])
 		}
 	}
+	if got := res.GatewaysForApp("681165d0-1c77-11ed-8650-cd35a51aa42a"); len(got) != len(wantGW) {
+		t.Errorf("app node-group gateways = %v, want %v", got, wantGW)
+	}
 	// Only valid IPs survive.
 	if len(res.DNS) != 1 || res.DNS[0] != "10.0.0.53" {
 		t.Errorf("dns = %v", res.DNS)
+	}
+}
+
+func TestGatewaysForApp(t *testing.T) {
+	res := &Resource{
+		Gateways:       []string{"flat:441"},
+		MajorNodeGroup: "major",
+		NodeGroups: map[string][]string{
+			"major":    {"major:441"},
+			"assigned": {"assigned:441"},
+		},
+		AppNodeGroups: map[string]string{"app": "assigned"},
+	}
+	if got := res.GatewaysForApp("app"); len(got) != 1 || got[0] != "assigned:441" {
+		t.Fatalf("assigned gateways = %v", got)
+	}
+	if got := res.GatewaysForApp("unknown"); len(got) != 1 || got[0] != "major:441" {
+		t.Fatalf("major fallback gateways = %v", got)
+	}
+	res.NodeGroups = nil
+	if got := res.GatewaysForApp("app"); len(got) != 1 || got[0] != "flat:441" {
+		t.Fatalf("flat fallback gateways = %v", got)
 	}
 }
 

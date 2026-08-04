@@ -23,8 +23,33 @@ type Resource struct {
 	IPRules []IPRule
 	// Gateways are the node group access addresses (host:port).
 	Gateways []string
+	// NodeGroups preserves the gateway addresses for each controller node
+	// group. Direct TCP tunnels must use the group assigned to the target app;
+	// the L3 tunnel can continue to use the flattened Gateways list.
+	NodeGroups map[string][]string
+	// AppNodeGroups maps an appId to its assigned node group.
+	AppNodeGroups map[string]string
+	// MajorNodeGroup is the controller's fallback node group.
+	MajorNodeGroup string
 	// DNS are controller-pushed resolver addresses, if any.
 	DNS []string
+}
+
+// GatewaysForApp returns the node-group gateway list assigned to appID. It
+// falls back to the major group, then to the flattened list for legacy
+// resource responses that do not carry node-group identifiers.
+func (r *Resource) GatewaysForApp(appID string) []string {
+	if r == nil {
+		return nil
+	}
+	groupID := r.AppNodeGroups[appID]
+	if groupID == "" {
+		groupID = r.MajorNodeGroup
+	}
+	if gateways := r.NodeGroups[groupID]; len(gateways) > 0 {
+		return append([]string(nil), gateways...)
+	}
+	return append([]string(nil), r.Gateways...)
 }
 
 // DomainRule is one domain entry of an app's addressList.
@@ -197,6 +222,7 @@ type clientResource struct {
 			AppInfo []struct {
 				Apps []struct {
 					ID          string `json:"id"`
+					NodeGroupID string `json:"nodeGroupId"`
 					AddressList []struct {
 						Protocol string `json:"protocol"`
 						Port     string `json:"port"`
@@ -206,6 +232,9 @@ type clientResource struct {
 			} `json:"appInfo"`
 			Config struct {
 				NodeGroupConf struct {
+					MajorNodeGroup struct {
+						ID string `json:"id"`
+					} `json:"majorNodeGroup"`
 					NodeGroupList []struct {
 						ID          string `json:"id"`
 						AddressInfo []struct {
@@ -259,9 +288,16 @@ func (c *Client) ClientResource(ctx context.Context) (*Resource, error) {
 // parseResource builds the routing policy from the appList (incl. the
 // catch-all apps 外网资源/内网资源段) and the gateway lines.
 func (c *Client) parseResource(cr *clientResource) *Resource {
-	res := &Resource{}
+	res := &Resource{
+		NodeGroups:     make(map[string][]string),
+		AppNodeGroups:  make(map[string]string),
+		MajorNodeGroup: cr.AppList.Data.Config.NodeGroupConf.MajorNodeGroup.ID,
+	}
 	for _, group := range cr.AppList.Data.AppInfo {
 		for _, app := range group.Apps {
+			if app.ID != "" && app.NodeGroupID != "" {
+				res.AppNodeGroups[app.ID] = app.NodeGroupID
+			}
 			var firstIP string
 			type hostEntry struct {
 				host  string
@@ -329,6 +365,7 @@ func (c *Client) parseResource(cr *clientResource) *Resource {
 	controllerHost := c.controllerHost()
 	seen := make(map[string]bool)
 	for _, ng := range cr.AppList.Data.Config.NodeGroupConf.NodeGroupList {
+		groupSeen := make(map[string]bool)
 		for _, info := range ng.AddressInfo {
 			addr := strings.TrimSpace(info.Address)
 			if addr == "" {
@@ -341,6 +378,10 @@ func (c *Client) parseResource(cr *clientResource) *Resource {
 			if !seen[addr] {
 				seen[addr] = true
 				res.Gateways = append(res.Gateways, addr)
+			}
+			if !groupSeen[addr] {
+				groupSeen[addr] = true
+				res.NodeGroups[ng.ID] = append(res.NodeGroups[ng.ID], addr)
 			}
 		}
 	}

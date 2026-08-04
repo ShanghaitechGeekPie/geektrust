@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"crypto/md5"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -21,12 +22,14 @@ var DefaultGateways = []string{"119.78.254.241:441", "59.78.171.241:441"}
 
 // Credential is everything the tunnel and resolver need from a live session.
 type Credential struct {
-	SID       string
-	DeviceID  string
-	CsrfToken string
-	Cookies   []*http.Cookie
-	Gateways  []string
-	DNS       []string
+	SID          string
+	DeviceID     string
+	Username     string
+	ConnectionID string
+	CsrfToken    string
+	Cookies      []*http.Cookie
+	Gateways     []string
+	DNS          []string
 	// Policy is the full routing policy (domain/IP/CIDR × port → appId)
 	// from clientResource.
 	Policy *sdpc.Resource
@@ -425,7 +428,7 @@ func (p *Provider) restore(ctx context.Context) (*Credential, *SessionInfo, erro
 	if !info.IsOnline {
 		return nil, nil, errors.New("persisted session is offline")
 	}
-	cred, err := p.finishLogin(ctx, sc, st.Gateways)
+	cred, err := p.finishLogin(ctx, sc, st.Gateways, info.Username)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -514,7 +517,7 @@ func (p *Provider) login(ctx context.Context) (*Credential, *SessionInfo, error)
 			p.logger.Info("device bound as trusted terminal")
 		}
 	}
-	cred, err := p.finishLogin(ctx, sc, nil)
+	cred, err := p.finishLogin(ctx, sc, nil, info.Username)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -557,7 +560,7 @@ func (p *Provider) smsFlow(ctx context.Context, sc *sdpc.Client) (string, error)
 
 // finishLogin pulls clientResource, assembles the Credential and persists the
 // state file. gatewaysOverride comes from the persisted state (if any).
-func (p *Provider) finishLogin(ctx context.Context, sc *sdpc.Client, gatewaysOverride []string) (*Credential, error) {
+func (p *Provider) finishLogin(ctx context.Context, sc *sdpc.Client, gatewaysOverride []string, username string) (*Credential, error) {
 	res, err := sc.ClientResource(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("clientResource: %w", err)
@@ -580,14 +583,16 @@ func (p *Provider) finishLogin(ctx context.Context, sc *sdpc.Client, gatewaysOve
 	}
 
 	cred := &Credential{
-		SID:       sc.SID(),
-		DeviceID:  p.cfg.DeviceID,
-		CsrfToken: sc.CSRF(),
-		Cookies:   sc.Cookies(),
-		Gateways:  gateways,
-		DNS:       dns,
-		Policy:    res,
-		AppID:     p.cfg.AppID,
+		SID:          sc.SID(),
+		DeviceID:     p.cfg.DeviceID,
+		Username:     username,
+		ConnectionID: fmt.Sprintf("%X-%d", md5.Sum([]byte(p.cfg.DeviceID)), time.Now().UnixMicro()),
+		CsrfToken:    sc.CSRF(),
+		Cookies:      sc.Cookies(),
+		Gateways:     gateways,
+		DNS:          dns,
+		Policy:       res,
+		AppID:        p.cfg.AppID,
 	}
 
 	records := make([]CookieRecord, 0, len(cred.Cookies))
