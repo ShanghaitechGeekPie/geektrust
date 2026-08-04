@@ -24,9 +24,10 @@
   应用程序  ─────►│  inbound 层        Dialer 接口        outbound 层                        │──────► aTrust 网关
  (curl/浏览器)    │  ┌────────────┐   ┌──────────────┐   ┌──────────────────────────────┐    │  TLS(0x05 帧)
   SOCKS5/HTTP    │  │ SOCKS5 服务 │   │              │   │ tunnel: TLS 接入/认证/心跳/重连 │    │
-                 │  │ HTTP 代理   │──►│net.Conn/UDP  │──►│ l3:每流认证 + gVisor IPv4    │    │
-                 │  └────────────┘   │ Dialer       │   │ frame:0x05 帧编解码          │    │
-                 │                    └──────────────┘   └──────────────────────────────┘    │
+                 │  │ HTTP 代理   │──►│net.Conn/UDP  │──►│ tcp:流式通道                 │    │
+                 │  └────────────┘   │ Dialer       │   │ l3:UDP/TCP回退 + gVisor IPv4 │    │
+                 │                    └──────────────┘   │ frame:0x05 帧编解码          │    │
+                 │                                        └──────────────────────────────┘    │
                  │        ▲                                          ▲                       │
                  │        │                                          │ 会话凭据               │
                  │  ┌─────┴──────────────────────────────────────────┴─────────┐            │
@@ -177,8 +178,9 @@ browser 模式下服务端是否再次要求短信并不完全由 `device_id` �
 
 ### 5.1 隧道(`tunnel/`)
 
-- **线路选择**(`line.go`):从网关线路列表(TECHNICAL.md §4.3)并发完成 TLS 握手后按延迟择优;
-  仅 TCP 可连接但无法完成网关 TLS 的地址不参与选择,失败时切换下一条。
+- **线路选择**(`line.go`):优先线路先发起 TLS,其余线路以短间隔错峰竞速;返回并直接复用
+  首个成功的 TLS 连接,不等待慢线路,也不再执行“探测后关闭、再连接一次”。
+  仅 TCP 可连接但无法完成网关 TLS 的地址进入冷却,失败时切换下一条。
 - **TLS 接入**:TCP 到 `<gateway>:441` → TLS(本网关接受不带 SPA 扩展的连接;SPA 见 TECHNICAL.md §10.4,当前非必需;
   如需,用 uTLS 注入 0xFF04 扩展)。
 - **隧道认证**(`tunnel.go`):写入 `05 01 D0` + `53 00 <len> {"sid":...}` + `05 04 00 01 00×6`;
@@ -188,8 +190,10 @@ browser 模式下服务端是否再次要求短信并不完全由 `device_id` �
   数据帧按 TECHNICAL.md §7.2 两种布局解析,**按 IP 头 total-length 拆分拼接的多个 IP 包**(`frame/codec.go`)。
 - **重连**(`reconnect.go`):指数退避(1s→30s 封顶);连续失败用持久化凭据静默重登;
   错误码 `10000002~4`/`99700001` 触发换线。
+- **TCP 流式通道**(`tcp.go`):按应用 node group 选择线路,合并发送认证和目标地址,
+  完整读取连接结果后用 `01 00` 数据帧中继;流式通道不可用或不兼容时回退到 L3。
 
-### 5.2 每连接认证与用户态 IPv4 栈(`l3/`)
+### 5.2 L3 兼容回退与用户态 IPv4 栈(`l3/`)
 
 - **authRequestIP**(`auth.go`):严格按 TECHNICAL.md §6.2 构造(字段顺序、`deviceId` 小写、完整 `env`、
   `procHash`=SHA256(path) 的**大写十六进制**,与 `env…fingerprint` 一致、**不含** `appToken`/`rcAppliedInfo`);
@@ -200,9 +204,9 @@ browser 模式下服务端是否再次要求短信并不完全由 `device_id` �
   - UDP 使用 connected endpoint 保留数据报边界,payload 上限 1372 字节以避免 IP 分片;
   - link endpoint 按 protocol/源端口取得 connectToken,把完整 IPv4 包封入 0x14 帧;
     同一 token 的连续包合并进一个多包帧,减少 TLS 与串行 socket write 开销。
-- **Dialer 实现**:`l3` 接收已解析的 IP、端口、`appId` 和可选域名:
-  原子保留源端口/下行路由 → per-conn auth 取 connectToken → 建立固定
-  VIP:srcPort 的 gVisor TCP 或 UDP endpoint → 返回 `net.Conn`。
+- **Dialer 实现**:`l3` 接收已解析的 IP、端口、`appId` 和可选域名。TCP 先使用
+  流式通道;流式通道不可用或不兼容时才执行原子保留源端口/下行路由 → per-conn auth
+  取 connectToken → 建立固定 VIP:srcPort 的 gVisor endpoint。UDP 始终使用该路径。
 
 ---
 
@@ -213,7 +217,8 @@ browser 模式下服务端是否再次要求短信并不完全由 `device_id` �
 - 网关对**快速连接 churn** 会瞬时拒绝(无 SYN-ACK)。握手超时最多退避重试 4 次;
   每连接认证 `10000008 auth in progress` 用较短退避重试;明确的 TCP RST/connection refused
   和持久认证拒绝立即返回,避免把目标服务故障放大成重试风暴。
-- **复用隧道**:一条隧道承载多条连接,避免频繁建立隧道;conntrack 按源端口复用管理。
+- **复用 L3 隧道**:UDP 和兼容回退 TCP 共用一条隧道;conntrack 按源端口管理。
+  TCP 流式通道缓存每个 node group 的健康首选线路,健康时不会为每条流并发打开备用线路。
 - 入口 EOF 先做 TCP 半关闭;完整关闭后由 gVisor 完成 FIN_WAIT_2/TIME_WAIT。下行路由保留
   130 秒(两个默认 60 秒状态周期加余量),避免过早注销造成 FIN/ACK 丢弃和端口复用冲突。
 

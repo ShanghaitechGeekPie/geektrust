@@ -7,13 +7,14 @@ geekTrust 是上海科技大学 aTrust VPN 的独立纯用户态客户端。它�
 ## 工作原理
 
 ```text
-应用程序 -> SOCKS5 / HTTP -> geekTrust -> TLS 隧道 -> aTrust 网关
+应用程序 -> SOCKS5 / HTTP -> geekTrust -> TCP 流式通道 / UDP L3 隧道 -> aTrust 网关
 ```
 
 - 使用 IDS passkey 完成免密码登录。
 - client 模式会在首次短信验证后尝试绑定授信终端。绑定成功后，会话失效时可静默重登，通常不再要求短信。
-- 每条 TCP 或 UDP 流先完成网关认证，再交给 gVisor 用户态 IPv4 栈处理。
-- 自动恢复会话、选择可用网关并维护隧道心跳。
+- TCP 使用网关原生流式代理，避免把下载流量封装成大量 L3 小包；流式通道不可用或不兼容时自动回退到 L3。
+- UDP 和 TCP 兼容回退由 gVisor 用户态 IPv4 栈处理。
+- 自动恢复会话；多条网关线路采用错峰 TLS 竞速，并直接复用首个成功连接，避免探测后重复建连。
 
 ## 快速开始
 
