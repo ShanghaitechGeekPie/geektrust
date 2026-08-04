@@ -3,15 +3,20 @@ package tunnel
 import (
 	"context"
 	"crypto/tls"
+	"errors"
+	"fmt"
 	"net"
-	"sort"
 	"sync"
 	"time"
 )
 
 const (
-	// probeTimeout bounds a single TCP probe of a gateway line.
+	// probeTimeout bounds a single TLS attempt to a gateway line.
 	probeTimeout = 3 * time.Second
+	// lineRaceDelay gives the preferred line a short head start. Healthy
+	// lines normally win without opening duplicate gateway connections, while
+	// a stalled line cannot hold up the fallback.
+	lineRaceDelay = 150 * time.Millisecond
 	// failCooldown keeps a line that just failed connection out of the
 	// probe winners, so a TCP-open-but-TLS-dead endpoint (e.g. the
 	// campus-internal address seen from outside) stops eating every
@@ -19,8 +24,8 @@ const (
 	failCooldown = 90 * time.Second
 )
 
-// Lines tracks the ordered gateway line pool: probes pick the
-// lowest-latency reachable line, failures rotate the pool.
+// Lines tracks an ordered gateway pool. The healthy preferred line starts
+// first, fallbacks join a staggered race, and failed lines enter cooldown.
 type Lines struct {
 	mu     sync.Mutex
 	addrs  []string
@@ -62,20 +67,22 @@ func (l *Lines) ReportFailure(addr string) {
 	l.mu.Unlock()
 }
 
-// Best probes every line concurrently and returns the TLS-capable one with
-// the lowest latency, skipping lines in cooldown. A TCP-only probe can select
-// a local transparent-proxy loop as a healthy gateway, so the probe completes
-// the same TLS handshake required by the tunnel.
-func (l *Lines) Best(ctx context.Context) (string, error) {
-	addrs := l.Addrs()
-	if len(addrs) == 0 {
-		return "", ErrNoLines
+// ReportSuccess makes addr the preferred first attempt and clears any prior
+// cooldown. It is called only after a complete TLS handshake succeeds.
+func (l *Lines) ReportSuccess(addr string) {
+	l.mu.Lock()
+	delete(l.failed, addr)
+	for i, candidate := range l.addrs {
+		if candidate == addr {
+			l.offset = i
+			break
+		}
 	}
-	if len(addrs) == 1 {
-		return addrs[0], nil
-	}
+	l.mu.Unlock()
+}
 
-	// Eligible = not recently failed; keep all if that would empty the pool.
+func (l *Lines) eligible() []string {
+	addrs := l.Addrs()
 	l.mu.Lock()
 	now := time.Now()
 	eligible := make([]string, 0, len(addrs))
@@ -86,46 +93,136 @@ func (l *Lines) Best(ctx context.Context) (string, error) {
 	}
 	l.mu.Unlock()
 	if len(eligible) == 0 {
-		eligible = addrs
+		return addrs
 	}
+	return eligible
+}
 
-	type result struct {
-		addr    string
-		latency time.Duration
-		ok      bool
+// allLinesTried reports whether every configured line either reached the
+// caller's next protocol stage or failed its TLS attempt recently. This lets a
+// stale session be refreshed even when one gateway rejects authentication and
+// another cannot get as far as authentication.
+func (l *Lines) allLinesTried(tried map[string]bool) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if len(l.addrs) == 0 {
+		return false
 	}
-	results := make([]result, len(eligible))
-	var wg sync.WaitGroup
-	for i, addr := range eligible {
-		wg.Add(1)
-		go func(i int, addr string) {
-			defer wg.Done()
-			start := time.Now()
-			probeCtx, cancel := context.WithTimeout(ctx, probeTimeout)
-			defer cancel()
-			conn, err := probeGatewayTLS(probeCtx, addr)
-			if err != nil {
-				return
-			}
-			conn.Close()
-			results[i] = result{addr: addr, latency: time.Since(start), ok: true}
-		}(i, addr)
-	}
-	wg.Wait()
-
-	var reachable []result
-	for _, r := range results {
-		if r.ok {
-			reachable = append(reachable, r)
+	now := time.Now()
+	for _, addr := range l.addrs {
+		if tried[addr] {
+			continue
+		}
+		failedAt, failed := l.failed[addr]
+		if !failed || now.Sub(failedAt) > failCooldown {
+			return false
 		}
 	}
-	if len(reachable) == 0 {
-		// Nothing answered the probe; try the preferred line anyway.
-		return eligible[0], nil
-	}
-	sort.Slice(reachable, func(i, j int) bool { return reachable[i].latency < reachable[j].latency })
-	return reachable[0].addr, nil
+	return true
 }
+
+type lineDialResult struct {
+	addr string
+	conn net.Conn
+	err  error
+}
+
+// DialTLS races eligible lines with a small stagger and returns the first
+// completed TLS connection. The winning socket is reused by the caller; this
+// avoids the old probe-close-redial sequence and does not wait for a slower
+// probe after one line is ready.
+func (l *Lines) DialTLS(ctx context.Context) (net.Conn, string, error) {
+	eligible := l.eligible()
+	if len(eligible) == 0 {
+		return nil, "", ErrNoLines
+	}
+
+	raceCtx, cancel := context.WithCancel(ctx)
+	results := make(chan lineDialResult, len(eligible))
+	for i, addr := range eligible {
+		go func(position int, addr string) {
+			if position > 0 {
+				timer := time.NewTimer(time.Duration(position) * lineRaceDelay)
+				select {
+				case <-timer.C:
+				case <-raceCtx.Done():
+					timer.Stop()
+					results <- lineDialResult{addr: addr, err: raceCtx.Err()}
+					return
+				}
+			}
+			attemptCtx, attemptCancel := context.WithTimeout(raceCtx, probeTimeout)
+			conn, err := probeGatewayTLS(attemptCtx, addr)
+			attemptCancel()
+			if raceCtx.Err() != nil && conn != nil {
+				conn.Close()
+				conn = nil
+			}
+			results <- lineDialResult{addr: addr, conn: conn, err: err}
+		}(i, addr)
+	}
+
+	var failures []error
+	for received := 0; received < len(eligible); received++ {
+		select {
+		case result := <-results:
+			if result.err != nil {
+				if err := ctx.Err(); err != nil {
+					cancel()
+					go closeLineResults(results, len(eligible)-received-1)
+					return nil, "", err
+				}
+				if !errors.Is(result.err, context.Canceled) {
+					l.ReportFailure(result.addr)
+					failures = append(failures, fmt.Errorf("gateway %s: %w", result.addr, result.err))
+				}
+				continue
+			}
+			if result.conn == nil {
+				failures = append(failures, fmt.Errorf("gateway %s returned no connection", result.addr))
+				continue
+			}
+			if err := ctx.Err(); err != nil {
+				result.conn.Close()
+				cancel()
+				go closeLineResults(results, len(eligible)-received-1)
+				return nil, "", err
+			}
+			cancel()
+			go closeLineResults(results, len(eligible)-received-1)
+			l.ReportSuccess(result.addr)
+			return result.conn, result.addr, nil
+		case <-ctx.Done():
+			cancel()
+			go closeLineResults(results, len(eligible)-received)
+			return nil, "", ctx.Err()
+		}
+	}
+	cancel()
+	if err := ctx.Err(); err != nil {
+		return nil, "", err
+	}
+	return nil, "", fmt.Errorf("no TLS-capable gateway line: %w", errors.Join(failures...))
+}
+
+func closeLineResults(results <-chan lineDialResult, remaining int) {
+	for range remaining {
+		if result := <-results; result.conn != nil {
+			result.conn.Close()
+		}
+	}
+}
+
+// Best retains the diagnostic line-selection API. Runtime callers should use
+// DialTLS so the successful connection is not discarded and opened again.
+func (l *Lines) Best(ctx context.Context) (string, error) {
+	conn, addr, err := l.DialTLS(ctx)
+	if conn != nil {
+		conn.Close()
+	}
+	return addr, err
+}
+
 func probeGatewayTLS(ctx context.Context, addr string) (net.Conn, error) {
 	raw, err := (&net.Dialer{}).DialContext(ctx, "tcp", addr)
 	if err != nil {

@@ -103,8 +103,13 @@ type Tunnel struct {
 	unknownLogAt   atomic.Int64
 }
 
+var gatewayTLSSessionCache = tls.NewLRUClientSessionCache(64)
+
 func gatewayTLSConfig(addr string) *tls.Config {
-	cfg := &tls.Config{InsecureSkipVerify: true}
+	cfg := &tls.Config{
+		InsecureSkipVerify: true,
+		ClientSessionCache: gatewayTLSSessionCache,
+	}
 	if host, _, err := net.SplitHostPort(addr); err == nil && net.ParseIP(host) == nil {
 		cfg.ServerName = host
 	}
@@ -116,21 +121,17 @@ func gatewayTLSConfig(addr string) *tls.Config {
 func Dial(ctx context.Context, addr, sid string, logger *slog.Logger) (*Tunnel, error) {
 	dialCtx, cancel := context.WithTimeout(ctx, connectTimeout)
 	defer cancel()
-
-	raw, err := (&net.Dialer{}).DialContext(dialCtx, "tcp", addr)
+	conn, err := probeGatewayTLS(dialCtx, addr)
 	if err != nil {
-		return nil, fmt.Errorf("tunnel dial %s: %w", addr, err)
+		return nil, fmt.Errorf("tunnel TLS %s: %w", addr, err)
 	}
+	return authenticateTunnel(ctx, conn, addr, sid, logger)
+}
 
-	// The gateway accepts plain TLS without SPA. Its certificate is issued
-	// for the portal hostname while we dial pool IPs, so verification is
-	// disabled like every known client does.
-	conn := tls.Client(raw, gatewayTLSConfig(addr))
-	if err := conn.HandshakeContext(dialCtx); err != nil {
-		raw.Close()
-		return nil, fmt.Errorf("tunnel tls %s: %w", addr, err)
-	}
-
+// authenticateTunnel performs the one-shot L3 tunnel authentication on an
+// already handshaken gateway TLS connection. Line selection reuses its winning
+// socket here instead of closing it and dialing the same gateway again.
+func authenticateTunnel(ctx context.Context, conn net.Conn, addr, sid string, logger *slog.Logger) (*Tunnel, error) {
 	// Bound the auth exchange by the caller's deadline (or connectTimeout),
 	// and unblock it if the context is canceled mid-exchange.
 	deadline := time.Now().Add(connectTimeout)
@@ -138,7 +139,7 @@ func Dial(ctx context.Context, addr, sid string, logger *slog.Logger) (*Tunnel, 
 		deadline = d
 	}
 	if err := conn.SetDeadline(deadline); err != nil {
-		raw.Close()
+		conn.Close()
 		return nil, fmt.Errorf("tunnel auth deadline: %w", err)
 	}
 	authDone := make(chan struct{})
@@ -146,13 +147,13 @@ func Dial(ctx context.Context, addr, sid string, logger *slog.Logger) (*Tunnel, 
 	go func() {
 		select {
 		case <-ctx.Done():
-			raw.Close()
+			conn.Close()
 		case <-authDone:
 		}
 	}()
 	authFrames, err := frame.EncodeTunnelAuth(sid)
 	if err != nil {
-		raw.Close()
+		conn.Close()
 		return nil, err
 	}
 	n, err := conn.Write(authFrames)
@@ -160,22 +161,22 @@ func Dial(ctx context.Context, addr, sid string, logger *slog.Logger) (*Tunnel, 
 		err = io.ErrShortWrite
 	}
 	if err != nil {
-		raw.Close()
+		conn.Close()
 		return nil, fmt.Errorf("tunnel auth write: %w", err)
 	}
 	// One bufio.Reader is shared by the auth reply and the frame loop.
 	br := bufio.NewReader(conn)
 	reply, err := frame.ReadTunnelAuthReply(br)
 	if err != nil {
-		raw.Close()
+		conn.Close()
 		return nil, err
 	}
 	if reply.VIP.To4() == nil {
-		raw.Close()
+		conn.Close()
 		return nil, errors.New("tunnel assigned an IPv6-only VIP; this gateway data plane requires IPv4")
 	}
 	if err := conn.SetDeadline(time.Time{}); err != nil {
-		raw.Close()
+		conn.Close()
 		return nil, fmt.Errorf("clear tunnel auth deadline: %w", err)
 	}
 
