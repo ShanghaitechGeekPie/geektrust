@@ -126,6 +126,15 @@ export async function post(path: string, body: unknown): Promise<void> {
   });
 }
 
+export async function postJSON<T>(path: string, body: unknown): Promise<T> {
+  const resp = await doFetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return (await resp.json()) as T;
+}
+
 export async function fetchTrustDevices(): Promise<TrustDeviceList> {
   const resp = await doFetch("/api/trust-devices");
   return (await resp.json()) as TrustDeviceList;

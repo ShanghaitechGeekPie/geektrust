@@ -2,8 +2,12 @@ package session
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"sync"
@@ -12,7 +16,14 @@ import (
 	"time"
 
 	"geektrust/internal/config"
+	"geektrust/internal/sdpc"
 )
+
+type smsHandlerFunc func(context.Context, func(context.Context) error) (string, error)
+
+func (f smsHandlerFunc) Prompt(ctx context.Context, resend func(context.Context) error) (string, error) {
+	return f(ctx, resend)
+}
 
 // TestProviderSingleFlightBroadcast: every concurrent caller of Credential
 // must observe the same in-flight login result (regression: a size-1 result
@@ -203,5 +214,94 @@ func TestStoreKeyExclusiveCreate(t *testing.T) {
 	got, err := st.Load()
 	if err != nil || got.SID != "second" {
 		t.Errorf("Load = %v, %v", got, err)
+	}
+}
+
+func TestSMSFlowRequestsFullLoginRestartAfterExpiredResend(t *testing.T) {
+	var sends atomic.Int32
+	controller := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/passport/v1/auth/sms" || r.URL.Query().Get("action") != "sendsms" {
+			http.NotFound(w, r)
+			return
+		}
+		code := int64(sdpc.CodeOK)
+		message := "OK"
+		if sends.Add(1) == 2 {
+			code = sdpc.CodeAuthTimeout
+			message = "当前认证已超时"
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"code": code, "message": message, "data": map[string]any{}})
+	}))
+	defer controller.Close()
+
+	p := &Provider{
+		logger: testLogger(),
+		smsHandler: smsHandlerFunc(func(ctx context.Context, resend func(context.Context) error) (string, error) {
+			return "", resend(ctx)
+		}),
+	}
+	sc := sdpc.NewClient(controller.URL, "Mac", "device", controller.Client())
+	_, err := p.smsFlow(context.Background(), sc)
+	if !errors.Is(err, errSMSAuthSessionExpired) {
+		t.Fatalf("expired resend error = %v, want full-login restart marker", err)
+	}
+	if !sdpc.IsSessionExpired(err) {
+		t.Fatalf("expired resend lost typed controller cause: %v", err)
+	}
+	if got := sends.Load(); got != 2 {
+		t.Fatalf("send calls = %d, want initial send plus one resend", got)
+	}
+}
+
+func TestSMSFlowRequestsFullLoginRestartAfterExpiredCodeCheck(t *testing.T) {
+	controller := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/passport/v1/auth/sms" {
+			http.NotFound(w, r)
+			return
+		}
+		response := map[string]any{"code": int64(sdpc.CodeOK), "message": "OK", "data": map[string]any{}}
+		if r.URL.Query().Get("action") == "checkcode" {
+			response["code"] = sdpc.CodeSessionInvalid
+			response["message"] = "会话无效"
+		}
+		_ = json.NewEncoder(w).Encode(response)
+	}))
+	defer controller.Close()
+
+	p := &Provider{
+		logger: testLogger(),
+		smsHandler: smsHandlerFunc(func(context.Context, func(context.Context) error) (string, error) {
+			return "123456", nil
+		}),
+	}
+	sc := sdpc.NewClient(controller.URL, "Mac", "device", controller.Client())
+	_, err := p.smsFlow(context.Background(), sc)
+	if !errors.Is(err, errSMSAuthSessionExpired) {
+		t.Fatalf("expired check error = %v, want full-login restart marker", err)
+	}
+	if !sdpc.IsSessionExpired(err) {
+		t.Fatalf("expired check lost typed controller cause: %v", err)
+	}
+}
+
+func TestSMSFlowDoesNotLoopWhenInitialSendAlreadyExpired(t *testing.T) {
+	controller := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"code": sdpc.CodeAuthTimeout, "message": "当前认证已超时", "data": map[string]any{},
+		})
+	}))
+	defer controller.Close()
+
+	p := &Provider{logger: testLogger(), smsHandler: smsHandlerFunc(func(context.Context, func(context.Context) error) (string, error) {
+		t.Fatal("prompt must not open after the initial send fails")
+		return "", nil
+	})}
+	sc := sdpc.NewClient(controller.URL, "Mac", "device", controller.Client())
+	_, err := p.smsFlow(context.Background(), sc)
+	if err == nil || !sdpc.IsSessionExpired(err) {
+		t.Fatalf("initial send error = %v, want typed session expiration", err)
+	}
+	if errors.Is(err, errSMSAuthSessionExpired) {
+		t.Fatalf("initial send error was marked for an unbounded automatic retry: %v", err)
 	}
 }

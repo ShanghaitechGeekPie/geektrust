@@ -302,6 +302,25 @@ func TestSMSEndpoints(t *testing.T) {
 	if r := recvPrompt(t, promptCh); r.err != nil || r.code != "123456" {
 		t.Fatalf("prompt = %+v", r)
 	}
+
+	// An expired controller authentication is accepted as an automatic
+	// full-login restart, and the old prompt receives the typed cause so it can
+	// retire instead of remaining stuck behind the dialog.
+	expired := &sdpc.APIError{Op: "sms", Code: sdpc.CodeAuthTimeout, Message: "当前认证已超时"}
+	promptCh, cancelExpired := startPrompt(broker, func(context.Context) error { return expired })
+	defer cancelExpired()
+	gen = waitArmed(t, broker)
+	body, _ = json.Marshal(map[string]uint64{"gen": gen})
+	resp = doJSON(t, srv.Client(), "POST", srv.URL+"/api/sms/resend", string(body), jsonHeaders)
+	if resp.StatusCode != http.StatusAccepted {
+		t.Errorf("expired resend = %d, want 202", resp.StatusCode)
+	}
+	if body := readBody(t, resp); !strings.Contains(body, `"restarting":true`) {
+		t.Errorf("expired resend body = %s", body)
+	}
+	if r := recvPrompt(t, promptCh); !sdpc.IsSessionExpired(r.err) {
+		t.Fatalf("expired prompt = %+v", r)
+	}
 }
 
 func TestReloginEndpoint(t *testing.T) {

@@ -2,6 +2,7 @@ package sdpc
 
 import (
 	"encoding/json"
+	"fmt"
 	"net"
 	"testing"
 )
@@ -305,8 +306,10 @@ func TestAPIErrorSessionExpired(t *testing.T) {
 		CodeOpAbnormal:     false,
 	} {
 		err := &APIError{Op: "test", Code: code, Message: "x"}
-		if got := IsSessionExpired(err); got != want {
-			t.Errorf("IsSessionExpired(code=%d) = %v, want %v", code, got, want)
+		for _, candidate := range []error{err, fmt.Errorf("wrapped: %w", err)} {
+			if got := IsSessionExpired(candidate); got != want {
+				t.Errorf("IsSessionExpired(%v) = %v, want %v", candidate, got, want)
+			}
 		}
 	}
 }

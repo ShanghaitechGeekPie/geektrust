@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { post, ApiError, errorText } from "../api";
+import { post, postJSON, ApiError, errorText } from "../api";
 import type { Snapshot } from "../types";
 
 const RESEND_COOLDOWN = 60;
@@ -18,6 +18,8 @@ export function SmsDialog({ snap }: { snap: Snapshot }) {
   const inputRef = useRef<HTMLInputElement>(null);
 
   const gen = snap.sms_pending ? snap.sms_gen : 0;
+  const currentGen = useRef(gen);
+  currentGen.current = gen;
   useEffect(() => {
     if (gen === 0) return;
     setCode("");
@@ -59,8 +61,10 @@ export function SmsDialog({ snap }: { snap: Snapshot }) {
     setError(null);
     setNotice(null);
     try {
-      await post("/api/sms/resend", { gen: snap.sms_gen });
-      setNotice("验证码已重新发送");
+      const requestedGen = snap.sms_gen;
+      const result = await postJSON<{ restarting?: boolean }>("/api/sms/resend", { gen: requestedGen });
+      if (currentGen.current !== requestedGen) return;
+      setNotice(result.restarting ? "验证会话已过期,正在重新建立会话并发送新验证码…" : "验证码已重新发送");
       setCooldown(RESEND_COOLDOWN);
     } catch (err) {
       if (err instanceof ApiError && err.status === 429) {

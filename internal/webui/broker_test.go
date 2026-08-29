@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"sync"
@@ -317,4 +318,65 @@ func TestBrokerResendTypedErrorPassthrough(t *testing.T) {
 	}
 	cancel()
 	recvPrompt(t, ch)
+}
+
+func TestBrokerExpiredResendRetiresPrompt(t *testing.T) {
+	b := NewBroker(func(bool, uint64) {})
+	apiErr := &sdpc.APIError{Op: "sms", Code: sdpc.CodeAuthTimeout, Message: "当前认证已超时"}
+	wrapped := fmt.Errorf("restart SMS login: %w", apiErr)
+	ch, cancel := startPrompt(b, func(context.Context) error { return wrapped })
+	defer cancel()
+	gen := waitArmed(t, b)
+
+	err := b.Resend(context.Background(), gen)
+	if !sdpc.IsSessionExpired(err) {
+		t.Fatalf("resend error = %v, want session expiration", err)
+	}
+	if err := b.ClaimWeb("123456", gen); !errors.Is(err, ErrNoPending) {
+		t.Fatalf("claim after expired resend = %v, want ErrNoPending", err)
+	}
+	result := recvPrompt(t, ch)
+	if result.code != "" || !sdpc.IsSessionExpired(result.err) {
+		t.Fatalf("prompt result = %+v, want expired-session error", result)
+	}
+
+	// The expired generation must be fully retired so the restarted login can
+	// arm a fresh SMS prompt instead of colliding with stale state.
+	next, cancelNext := startPrompt(b, nil)
+	defer cancelNext()
+	if nextGen := waitArmed(t, b); nextGen == gen {
+		t.Fatalf("new prompt reused expired generation %d", gen)
+	}
+	cancelNext()
+	if result := recvPrompt(t, next); !errors.Is(result.err, context.Canceled) {
+		t.Fatalf("new prompt cancellation = %+v", result)
+	}
+}
+
+func TestBrokerExpiredResendOverridesConcurrentClaim(t *testing.T) {
+	b := NewBroker(func(bool, uint64) {})
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	expired := &sdpc.APIError{Op: "sms", Code: sdpc.CodeSessionInvalid, Message: "会话无效"}
+	ch, cancel := startPrompt(b, func(context.Context) error {
+		close(entered)
+		<-release
+		return expired
+	})
+	defer cancel()
+	gen := waitArmed(t, b)
+
+	resendDone := make(chan error, 1)
+	go func() { resendDone <- b.Resend(context.Background(), gen) }()
+	<-entered
+	if err := b.ClaimWeb("123456", gen); err != nil {
+		t.Fatalf("claim during resend = %v", err)
+	}
+	close(release)
+	if err := <-resendDone; !sdpc.IsSessionExpired(err) {
+		t.Fatalf("resend error = %v, want session expiration", err)
+	}
+	if result := recvPrompt(t, ch); result.code != "" || !sdpc.IsSessionExpired(result.err) {
+		t.Fatalf("expired resend lost to concurrent code claim: %+v", result)
+	}
 }

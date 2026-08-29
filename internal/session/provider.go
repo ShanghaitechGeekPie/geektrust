@@ -20,6 +20,11 @@ import (
 // neither config nor clientResource provides any.
 var DefaultGateways = []string{"119.78.254.241:441", "59.78.171.241:441"}
 
+// errSMSAuthSessionExpired marks an expiration discovered after the user has
+// entered the SMS wait. login catches it and rebuilds the whole IDS/controller
+// authentication chain instead of publishing a terminal login failure.
+var errSMSAuthSessionExpired = errors.New("SMS authentication session expired")
+
 // Credential is everything the tunnel and resolver need from a live session.
 type Credential struct {
 	SID          string
@@ -448,9 +453,27 @@ func (p *Provider) newSDPC(hc *http.Client) *sdpc.Client {
 	return sc
 }
 
-// login runs the full sequence: IDS passkey → CAS → reportEnv → authCheck
-// (→ SMS when requested) → session exchange → clientResource.
+// login retries the full authentication chain when the controller expires an
+// SMS authentication session while the user is waiting. Each retry is driven
+// by a resend or code submission, so a broken controller cannot create a tight
+// automatic retry loop.
 func (p *Provider) login(ctx context.Context) (*Credential, *SessionInfo, error) {
+	for {
+		cred, session, err := p.loginOnce(ctx)
+		if !errors.Is(err, errSMSAuthSessionExpired) {
+			return cred, session, err
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, nil, ctxErr
+		}
+		p.logger.Warn("SMS authentication session expired; restarting full login", "err", err)
+		p.emit(Event{Kind: EventLoginStart, Message: "短信验证会话已过期，正在重新建立登录会话"})
+	}
+}
+
+// loginOnce runs one full sequence: IDS passkey → CAS → reportEnv → authCheck
+// (→ SMS when requested) → session exchange → clientResource.
+func (p *Provider) loginOnce(ctx context.Context) (*Credential, *SessionInfo, error) {
 	ks, err := idsauth.LoadKeystore(p.cfg.Keystore)
 	if err != nil {
 		return nil, nil, err
@@ -541,9 +564,15 @@ func (p *Provider) smsFlow(ctx context.Context, sc *sdpc.Client) (string, error)
 	var code string
 	var promptErr error
 	if p.smsHandler != nil {
-		// resendFn keeps the typed *sdpc.APIError so the web layer can map
-		// 75500401 to HTTP 429.
-		resendFn := func(ctx context.Context) error { return sc.SendSMS(ctx) }
+		// Keep typed controller errors for the web layer. An expired auth
+		// session also carries the private restart marker consumed by login.
+		resendFn := func(ctx context.Context) error {
+			err := sc.SendSMS(ctx)
+			if sdpc.IsSessionExpired(err) {
+				return fmt.Errorf("%w: resend SMS: %w", errSMSAuthSessionExpired, err)
+			}
+			return err
+		}
 		code, promptErr = p.smsHandler.Prompt(ctx, resendFn)
 	} else {
 		code, promptErr = p.prompt(ctx)
@@ -553,6 +582,9 @@ func (p *Provider) smsFlow(ctx context.Context, sc *sdpc.Client) (string, error)
 	}
 	ticket, err := sc.CheckSMSCode(ctx, code)
 	if err != nil {
+		if sdpc.IsSessionExpired(err) {
+			return "", fmt.Errorf("%w: check sms code: %w", errSMSAuthSessionExpired, err)
+		}
 		return "", fmt.Errorf("check sms code: %w", err)
 	}
 	return ticket, nil

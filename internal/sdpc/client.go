@@ -12,6 +12,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -63,8 +64,8 @@ func (e *APIError) Error() string {
 // IsSessionExpired reports whether the error means the session is gone and a
 // re-login is required.
 func IsSessionExpired(err error) bool {
-	apiErr, ok := err.(*APIError)
-	if !ok {
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
 		return false
 	}
 	switch apiErr.Code {

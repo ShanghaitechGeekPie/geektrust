@@ -220,7 +220,7 @@ type SMSHandler interface {
 func (p *Provider) SetSMSHandler(h SMSHandler)
 ```
 
-`smsFlow` 改为：若 handler 非 nil，调用 `handler.Prompt(ctx, resendFn)`；否则走现有 `p.prompt(ctx)`。`resendFn` 捕获当前 `sc` 调用 `sc.SendSMS` 并**原样返回错误**（保留 `*sdpc.APIError` 类型）；webui handler 用 `errors.As` + `CodeSMSStillValid`(75500401) 映射 429，其余错误 500，Message 经 §4.4 脱敏后展示。
+`smsFlow` 改为：若 handler 非 nil，调用 `handler.Prompt(ctx, resendFn)`；否则走现有 `p.prompt(ctx)`。`resendFn` 捕获当前 `sc` 调用 `sc.SendSMS` 并保留 `*sdpc.APIError` 类型；`CodeSMSStillValid`(75500401) 映射 429。若重发或提交验证码时发现认证会话已过期，Broker 结束旧 Prompt，Provider 在同一个 acquire 内重跑 IDS/CAS/authCheck 并建立新短信代，重发端点返回 202 `{"restarting":true}`；其余错误返回 500，Message 经 §4.4 脱敏后展示。
 
 ### 5.2 Broker 结构
 
@@ -235,9 +235,10 @@ type Broker struct {
 
 type smsPending struct {
     gen      uint64
-    result   chan string // cap 1;仅 claim 成功者写入
-    resolved bool        // mu 保护;已被某通道 claim
+    result   chan smsPromptResult // cap 1;验证码或会话过期结果
+    resolved bool        // mu 保护;验证码或会话过期已胜出
     done     bool        // mu 保护;Prompt 已退出
+    expired  error       // mu 保护;重发已确认认证会话过期
     resend   func(context.Context) error
     // opMu 是每代独立的操作锁:只序列化 resend 与 Prompt 退出,
     // 不阻塞 claim;网络 I/O 期间持有 opMu 而不持有 Broker 的 mu。
@@ -259,19 +260,19 @@ type smsPending struct {
 
 `Prompt(ctx, resend)`：
 
-1. `mu.Lock`：`gen++`（**跳过 0**：回绕到 0 时再自增一次，0 永远表示"无 pending"）；创建本地 `result := make(chan string, 1)` 并以它安装 `pending{gen, result, resolved:false, done:false, resend}`；`mu.Unlock`。此后步骤统一引用该本地 `result`，不经过 `b.pending`。
+1. `mu.Lock`：`gen++`（**跳过 0**：回绕到 0 时再自增一次，0 永远表示"无 pending"）；创建本地 `result := make(chan smsPromptResult, 1)` 并以它安装 `pending{gen, result, resolved:false, done:false, resend}`；`mu.Unlock`。此后步骤统一引用该本地 `result`，不经过 `b.pending`。
 2. 调用 `onPendingChange(true, gen)` —— **先完成布防，Hub 才对网页可见 `sms_pending=true` 与正确的 `sms_gen`**，不存在"快照显示 pending 但 POST 无投递目标"的窗口。
-3. `select` 等待并记录胜出分支：`case code := <-result`（记 `gotCode=true` 并保存 code）或 `<-ctx.Done()`（记 `gotCode=false`）。
+3. `select` 等待并记录胜出分支：`case resultValue := <-result`（记 `gotResult=true` 并保存验证码或过期错误）或 `<-ctx.Done()`（记 `gotResult=false`）。
 4. **统一退出裁决（关键，`mu.Lock` 一次定胜负）**：`mu.Lock` 并绑定当前代指针 `p := b.pending`（`b.pending` 只能被本 Prompt 的退出路径清除，此处必非 nil）；
-   - 若 `p.resolved`（claim 已仲裁成功）：若 `!gotCode` 则执行 `code = <-result`（claim 在置 `resolved=true` 后才写通道且写入无需任何锁，该接收至多等待这一次通道写入，必然成功）；置 `p.done=true`、`b.pending=nil`，`mu.Unlock`；调 `onPendingChange(false, 0)`；`p.opMu.Lock(); p.opMu.Unlock()`（等待该代在飞 resend）；返回该 code。`gotCode=true` 时**复用第 3 步已保存的 code，不得再次接收**（result 仅一个缓冲值，重复接收会死锁）。
-   - 否则（真正取消）：置 `p.done=true`、`b.pending=nil`（**必须在本次持锁内完成**，此后到达的 claim 一律 409），`mu.Unlock`；调 `onPendingChange(false, 0)`；`p.opMu.Lock(); p.opMu.Unlock()`；返回 ctx 错误。
+   - 若 `p.resolved`：若 `!gotResult` 则从 `result` 接收唯一结果；置 `p.done=true`、`b.pending=nil`，`mu.Unlock`；调 `onPendingChange(false, 0)`；`p.opMu.Lock(); p.opMu.Unlock()`（等待该代在飞 resend）。随后在 `mu` 下读取 `p.expired`；若非 nil，返回过期错误，否则返回第 3 步保存的结果。
+   - 否则（真正取消）：置 `p.done=true`、`b.pending=nil`（**必须在本次持锁内完成**，此后到达的 claim 一律 409），`mu.Unlock`；调 `onPendingChange(false, 0)`；`p.opMu.Lock(); p.opMu.Unlock()`；同样先检查 `p.expired`，未过期才返回 ctx 错误。
 
 由此：每个缓冲值只被消费一次；claim 与取消在同一 mu 下裁决，不存在"202 已投递但 Prompt 未取码"的窗口；退出全程使用持锁期绑定的代指针 `p`，不引用已清空的 `b.pending`；Prompt 返回后 `smsFlow` 的 `CheckSMSCode` 绝不与在飞的 `SendSMS` 并发。
 
 `claim(code, gen, source)`（网页 POST 与 stdin 行共用入口，两条规则）：
 
 1. `mu.Lock`；满足任一条件即 `mu.Unlock` 返回 `ErrNoPending`（HTTP 映射 409）：`pending==nil`、`pending.done`、`pending.resolved`；**仅当 source 为网页时**追加判定 `gen != pending.gen`。终端通道（`claimTerminal`）免代校验：同一 mu 下直接命中当前 pending（终端用户看到的是当前提示，无跨代窗口）。
-2. 否则在同一持锁区间内绑定 `p := b.pending`、置 `p.resolved=true`，`mu.Unlock`，随后 `p.result <- code`（写入的是持锁期绑定的代通道；cap 1 且不可能有其他写入者，永不阻塞——即使 Prompt 随后清空了 `b.pending` 也不受影响）。
+2. 否则在同一持锁区间内绑定 `p := b.pending`、置 `p.resolved=true`，`mu.Unlock`，随后 `p.result <- smsPromptResult{code: code}`（写入的是持锁期绑定的代通道；cap 1 且不可能有其他写入者，永不阻塞——即使 Prompt 随后清空了 `b.pending` 也不受影响）。
 3. 只有 claim 成功者得到 202；后到者、跨代提交一律 409。验证码格式（6 位数字）在 HTTP 层与 stdin 行处理处各自校验。
 
 **代（gen）进入 HTTP 契约**：快照包含 `sms_gen`（仅 pending 时非 0，值来自 Broker 回调）；`POST /api/sms` 与 `POST /api/sms/resend` 请求体必须携带当前代，gen 缺失/不匹配返回 409（防止旧 Prompt 时代的延迟提交/重发误投新 Prompt）。stdin 通道不做 gen 校验。
@@ -280,9 +281,9 @@ type smsPending struct {
 1. `mu.Lock`：校验 `pending!=nil && !done && !resolved && gen==pending.gen`，取出 pending 指针；失败 → `mu.Unlock`，409。
 2. `mu.Unlock`；`p.opMu.Lock()`。
 3. **重校验**：`mu.Lock` 再次确认同一 pending 仍满足 `!done && !resolved && gen 相等`；失败 → 两个锁都释放，409（防止 claim/退出后越权执行）。
-4. `mu.Unlock`；以 handler 传入的 `ctx`（`/api/sms/resend` 用 `r.Context()`）调用 resend 闭包（持 opMu，耗时秒级）；`p.opMu.Unlock()`。
+4. `mu.Unlock`；以 handler 传入的 `ctx`（`/api/sms/resend` 用 `r.Context()`）调用 resend 闭包（持 opMu，耗时秒级）。若返回会话过期错误，在 `mu` 下记录 `p.expired`；尚无 claim 时由该错误占用 `resolved` 并写入 `result`，已有 claim 时也保留 `expired`，由 Prompt 等待 opMu 后优先返回。最后释放 `p.opMu`。
 
-**resend 与 claim 的仲裁规则（唯一）**：claim 只经 Broker mu，**允许**在 resend 网络 I/O 进行中完成（用户已持有短信，提交当前代验证码不受重发影响）；opMu 保证的是 resend 与 **Prompt 退出**互斥——Prompt 返回（继而 `smsFlow` 调 `CheckSMSCode`）绝不代表仍有在飞的 `SendSMS`。已确认并发安全前提：Prompt 挂起期间 `sc` 无其他使用者，`SendSMS` 不修改 `sdpc.Client` 可变字段（csrf 只读）；若未来 `SendSMS` 行为改变需重审此约束。
+**resend 与 claim 的仲裁规则（唯一）**：claim 只经 Broker mu，**允许**在 resend 网络 I/O 进行中完成（用户已持有短信，提交当前代验证码不受重发影响）；若该 resend 已确认会话过期，则过期结果优先于并发 claim，旧验证码不再提交。opMu 保证 resend 与 **Prompt 退出**互斥——Prompt 返回（继而 `smsFlow` 调 `CheckSMSCode`）时不再有在飞的 `SendSMS`。已确认并发安全前提：Prompt 挂起期间 `sc` 无其他使用者，`SendSMS` 不修改 `sdpc.Client` 可变字段（csrf 只读）；若未来 `SendSMS` 行为改变需重审此约束。
 
 `EventInvalidated` 事件**不**清除 pending：进行中的登录不被 `Invalidate` 取消（forceLogin 只影响下一次 acquire），SMS 窗口随 Prompt 返回自然结束。
 
@@ -411,7 +412,7 @@ webui 的 trust-device/relogin handler 依赖一个窄接口（`ActiveSDPC`、`T
 | GET | `/api/status` | — | 200 快照（§6.3） | 页面加载时拉取一次 |
 | GET | `/api/events` | — | SSE 流 | 见 §6.4 |
 | POST | `/api/sms` | `{"code":"123456","gen":3}` | 202 `{}` | code 必须 6 位数字，否则 400；gen 缺失/不匹配或 claim 失败 409。202 仅表示已投递，验证结果经状态推送反映 |
-| POST | `/api/sms/resend` | `{"gen":3}` | 202 `{}` | 无有效 pending 或 gen 不匹配 409；`75500401` 映射 429 + 服务端消息 |
+| POST | `/api/sms/resend` | `{"gen":3}` | 202 `{}` 或 `{"restarting":true}` | 无有效 pending 或 gen 不匹配 409；`75500401` 映射 429 + 服务端消息；认证会话过期时自动重建完整登录并返回 `restarting` |
 | POST | `/api/relogin` | `{}` | 202 `{}` | 见 §7.3 |
 | GET | `/api/trust-devices` | — | 200（§7.4） | `ActiveSDPC()` 为 nil 时 503 |
 | POST | `/api/trust-devices/bind` | `{}` | 200 `{}` | `client_type != client` 时 409；无活动会话 503 |
@@ -486,7 +487,7 @@ web/
 - `package-lock.json` 提交到 git（`npm ci` 可重现构建）。
 - 数据层 `api.ts`：fetch + `EventSource`；单例 store（`useSyncExternalStore`），不引入状态库。
 - 无路由，单页。UI 文案中文。样式手写 CSS（约 250 行），深浅色按 `prefers-color-scheme`。
-- 短信弹窗：`state === "sms_required"` 时自动弹出、输入框自动聚焦；提交时携带当前 `sms_gen`；提交后进入"验证中"等待状态推送；60 秒倒计时仅作提示（客户端计时）。
+- 短信弹窗：`state === "sms_required"` 时自动弹出、输入框自动聚焦；提交时携带当前 `sms_gen`；提交后进入"验证中"等待状态推送；60 秒倒计时仅作提示（客户端计时）。重发发现认证会话过期时显示正在重建会话，旧代关闭后由新 `sms_gen` 重置表单并接收新验证码。
 - 错误展示 `errors.ts`：后端传来的是 Go 错误链（`check sms code: sdpc checkSms: code 75500403: 验证码错误`），
   直接渲染会让面板显得像坏了。`friendlyError()` 依次尝试：§11.1 控制面错误码表 → 网络/TLS 特征 →
   错误链尾部的中文片段，得到一行可行动的中文；原文经 `ErrorText` 的「详情」按钮展开，排障信息不丢。
@@ -554,9 +555,9 @@ build: web
 | 包 | 测试 |
 |---|---|
 | `internal/config` | `[web]` 缺省→enabled true + 默认 listen；显式 false；非回环拒绝（`0.0.0.0`、公网 IP、域名）；`localhost`/`::1` 接受；端口非法拒绝（`0`、空、服务名、`80`）；规范化（`[0:0:0:0:0:0:0:1]:8081`→`[::1]:8081`、前导零去除）；`PrepareInitialConfig` 返回值与渲染 TOML 均含 `[web]` 默认 |
-| `internal/session` | 事件发射：login 成功/失败各一例；成功 Observer 回调内断言 `ActiveSDPC()!=nil`（验证先发布后入队；不断言 TryForceRelogin，此时它按契约应返回 ok=true 且会清状态，破坏性操作不放回调里）；FIFO 顺序（invalidated 先于 login_start 入队则先送达）；Observer 回调内调用 `Credential` 不死锁（带超时）；脱敏覆盖 ticket/sid/code/password；`TryForceRelogin`：acquire 进行中 ok=false，成功后 ok=true 且 cur 被清、invalidated 已入队，预留未消费期间第二次调用 ok=false，run 执行后确实发生跳过 restore 的新登录；`InvalidateIfCurrent`：过期 expected 为 no-op（刚提交的重登结果不被抹掉），当前 expected 才清状态并入队；队列溢出后 `Event.Dropped` 递增且随事件可见 |
-| `internal/webui` Broker | 网页胜出后**终端通道再赢一次**（回归：孤儿 Scanner 吞码）；终端通道胜出；近同时双通道提交只有一个 claim 成功——网页胜则该 POST 202 且终端行被忽略（ErrNoPending）；终端胜则网页 POST 409；gen 不匹配的跨代提交 409；布防后快照 `sms_gen` 等于 Broker 当前代、拆除后归 0；gen 回绕跳过 0（MaxUint64 用例）；取消持锁后到达的 claim 一律 409；ctx 取消与 claim 竞态：claim 在先则 Prompt 仍返回该码；无 pending 时提交/resend 409；resend 重校验必须真正命中第二道检查——先发起 Resend 并使其停在首次校验之后（持有该代 opMu），完成 claim，释放后断言返回 409 且 resend 闭包未被调用；resend 进行中 Prompt 不返回的鉴别性用例——resend 通过重校验后阻塞其闭包（占住该代 opMu），随后 claim 成功，断言 Prompt 在闭包释放前不返回、释放后返回该 code |
-| `internal/webui` HTTP | status 快照字段与凭据红线（响应体不含 `sid`/`csrf`/ticket）；快照事件对象**精确**只含 `ts`/`kind`/`message`；Host 不符 403；跨源 Origin POST 403；非 JSON POST 403；全部响应含 `frame-ancestors` 与 `X-Frame-Options`；`/api/events` 为 `text/event-stream` 且首帧完整快照；sms 提交 202/400/409；resend 202/409 之外必须验证类型化错误映射——假 resend 闭包返回 `*sdpc.APIError{Code:75500401}` 时 429、返回其他错误时 500（§5.1/§7.2 跨包契约）；relogin：无 acquire 202 且状态转 connecting，acquire 进行中 409，且 202 后确实发生新登录；trust-devices 503（无会话）/409（browser 绑定）/200（假 sdpc 服务器）；Hub 消费：配置覆盖值与 clientResource 值各断言一次快照 gateways/dns；`login_failed`→`restore_success` 后 `last_error` 为 null |
+| `internal/session` | 事件发射：login 成功/失败各一例；成功 Observer 回调内断言 `ActiveSDPC()!=nil`（验证先发布后入队；不断言 TryForceRelogin，此时它按契约应返回 ok=true 且会清状态，破坏性操作不放回调里）；FIFO 顺序（invalidated 先于 login_start 入队则先送达）；Observer 回调内调用 `Credential` 不死锁（带超时）；脱敏覆盖 ticket/sid/code/password；`TryForceRelogin`：acquire 进行中 ok=false，成功后 ok=true 且 cur 被清、invalidated 已入队，预留未消费期间第二次调用 ok=false，run 执行后确实发生跳过 restore 的新登录；`InvalidateIfCurrent`：过期 expected 为 no-op（刚提交的重登结果不被抹掉），当前 expected 才清状态并入队；短信重发或 checkcode 返回会话过期时保留类型化原因并标记完整登录重启，初次 sendsms 立即过期则不进入无界重试；队列溢出后 `Event.Dropped` 递增且随事件可见 |
+| `internal/webui` Broker | 网页胜出后**终端通道再赢一次**（回归：孤儿 Scanner 吞码）；终端通道胜出；近同时双通道提交只有一个 claim 成功——网页胜则该 POST 202 且终端行被忽略（ErrNoPending）；终端胜则网页 POST 409；gen 不匹配的跨代提交 409；布防后快照 `sms_gen` 等于 Broker 当前代、拆除后归 0；gen 回绕跳过 0（MaxUint64 用例）；取消持锁后到达的 claim 一律 409；ctx 取消与 claim 竞态：claim 在先则 Prompt 仍返回该码；无 pending 时提交/resend 409；resend 重校验必须真正命中第二道检查——先发起 Resend 并使其停在首次校验之后（持有该代 opMu），完成 claim，释放后断言返回 409 且 resend 闭包未被调用；resend 进行中 Prompt 不返回的鉴别性用例——resend 通过重校验后阻塞其闭包（占住该代 opMu），随后 claim 成功，断言 Prompt 在闭包释放前不返回、释放后返回该 code；会话过期的 resend 结束旧 Prompt 并允许新代布防，且并发 claim 已胜出时仍由已知过期结果覆盖验证码 |
+| `internal/webui` HTTP | status 快照字段与凭据红线（响应体不含 `sid`/`csrf`/ticket）；快照事件对象**精确**只含 `ts`/`kind`/`message`；Host 不符 403；跨源 Origin POST 403；非 JSON POST 403；全部响应含 `frame-ancestors` 与 `X-Frame-Options`；`/api/events` 为 `text/event-stream` 且首帧完整快照；sms 提交 202/400/409；resend 202/409 之外必须验证类型化错误映射——假 resend 闭包返回 `*sdpc.APIError{Code:75500401}` 时 429、会话过期时 202 `{"restarting":true}`、返回其他错误时 500（§5.1/§7.2 跨包契约）；relogin：无 acquire 202 且状态转 connecting，acquire 进行中 409，且 202 后确实发生新登录；trust-devices 503（无会话）/409（browser 绑定）/200（假 sdpc 服务器）；Hub 消费：配置覆盖值与 clientResource 值各断言一次快照 gateways/dns；`login_failed`→`restore_success` 后 `last_error` 为 null |
 | `cmd/geektrust` | web listen 与启用的 inbound 监听冲突时 `webActive=false` 走降级路径（辅助函数单测），无冲突时正常装配 |
 | 构建 | 仅含 `.gitkeep` 的 dist 下 `go build ./cmd/geektrust` 成功（`go test ./...` 隐含覆盖 embed）；commit 4 必须通过 `npm --prefix web ci && npm --prefix web run build`（含 tsc） |
 

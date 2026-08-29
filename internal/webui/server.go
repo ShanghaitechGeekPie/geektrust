@@ -227,6 +227,10 @@ func (s *Server) handleResend(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case err == nil:
 		writeJSON(w, http.StatusAccepted, map[string]any{})
+	case sdpc.IsSessionExpired(err):
+		// Broker has retired the stale prompt; the existing Provider
+		// acquisition will rebuild the authentication chain in the background.
+		writeJSON(w, http.StatusAccepted, map[string]any{"restarting": true})
 	case errors.Is(err, ErrNoPending):
 		writeError(w, http.StatusConflict, "no SMS verification pending (or stale generation)")
 	default:

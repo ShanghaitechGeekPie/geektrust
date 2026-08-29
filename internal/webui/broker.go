@@ -9,6 +9,8 @@ import (
 	"os"
 	"strings"
 	"sync"
+
+	"geektrust/internal/sdpc"
 )
 
 // ErrNoPending is returned by claims and resends when no SMS verification is
@@ -19,14 +21,20 @@ var ErrNoPending = errors.New("no SMS verification pending")
 // I/O against Prompt teardown only; claims never touch it.
 type smsPending struct {
 	gen      uint64
-	result   chan string // cap 1; written once by the winning claim
-	resolved bool        // Broker.mu: a claim won
-	done     bool        // Broker.mu: Prompt retired this generation
+	result   chan smsPromptResult // cap 1; written once by the winning resolution
+	resolved bool                 // Broker.mu: a code or session expiration won
+	done     bool                 // Broker.mu: Prompt retired this generation
+	expired  error                // Broker.mu: resend proved the auth session expired
 	resend   func(context.Context) error
 	opMu     sync.Mutex
 	// opWaiters counts resends between the first validation and the opMu
 	// acquisition (observability for tests; guarded by Broker.mu).
 	opWaiters int
+}
+
+type smsPromptResult struct {
+	code string
+	err  error
 }
 
 // Broker implements session.SMSHandler with two equivalent channels: the
@@ -62,7 +70,7 @@ func (b *Broker) Prompt(ctx context.Context, resend func(context.Context) error)
 	if b.gen == 0 { // rollover: 0 is the "no pending" sentinel
 		b.gen++
 	}
-	result := make(chan string, 1)
+	result := make(chan smsPromptResult, 1)
 	p := &smsPending{gen: b.gen, result: result, resend: resend}
 	b.pending = p
 	b.mu.Unlock()
@@ -74,11 +82,11 @@ func (b *Broker) Prompt(ctx context.Context, resend func(context.Context) error)
 	// that has no delivery target.
 	b.onPendingChange(true, p.gen)
 
-	var code string
-	gotCode := false
+	var resultValue smsPromptResult
+	gotResult := false
 	select {
-	case code = <-result:
-		gotCode = true
+	case resultValue = <-result:
+		gotResult = true
 	case <-ctx.Done():
 	}
 
@@ -87,10 +95,10 @@ func (b *Broker) Prompt(ctx context.Context, resend func(context.Context) error)
 	b.mu.Lock()
 	cur := b.pending // only this Prompt can clear it, so it is never nil here
 	if cur.resolved {
-		if !gotCode {
-			// The claim marked resolved before its (lock-free) channel
+		if !gotResult {
+			// The winner marked resolved before its (lock-free) channel
 			// write; that write is the only one, so this receive succeeds.
-			code = <-result
+			resultValue = <-result
 		}
 		cur.done = true
 		b.pending = nil
@@ -99,7 +107,13 @@ func (b *Broker) Prompt(ctx context.Context, resend func(context.Context) error)
 		// Wait for an in-flight resend so CheckSMSCode never overlaps it.
 		cur.opMu.Lock()
 		cur.opMu.Unlock()
-		return code, nil
+		b.mu.Lock()
+		expired := cur.expired
+		b.mu.Unlock()
+		if expired != nil {
+			return "", expired
+		}
+		return resultValue.code, resultValue.err
 	}
 	cur.done = true
 	b.pending = nil
@@ -107,6 +121,12 @@ func (b *Broker) Prompt(ctx context.Context, resend func(context.Context) error)
 	b.onPendingChange(false, 0)
 	cur.opMu.Lock()
 	cur.opMu.Unlock()
+	b.mu.Lock()
+	expired := cur.expired
+	b.mu.Unlock()
+	if expired != nil {
+		return "", expired
+	}
 	return "", ctx.Err()
 }
 
@@ -133,7 +153,7 @@ func (b *Broker) claim(code string, gen uint64, web bool) error {
 	b.mu.Unlock()
 	// Send on the generation channel bound under the lock; cap 1 and the
 	// only writer, so this never blocks even after Prompt cleared pending.
-	p.result <- code
+	p.result <- smsPromptResult{code: code}
 	return nil
 }
 
@@ -165,7 +185,26 @@ func (b *Broker) Resend(ctx context.Context, gen uint64) error {
 	if !valid {
 		return ErrNoPending
 	}
-	return resendFn(ctx)
+	err := resendFn(ctx)
+	if !sdpc.IsSessionExpired(err) {
+		return err
+	}
+
+	// The controller discarded the authentication behind this prompt. Retire
+	// the generation and wake the blocked Provider so it can rebuild the full
+	// login chain. Record the expiration even if a code claim already won:
+	// Prompt waits for opMu and lets this known expiration override that code.
+	b.mu.Lock()
+	p.expired = err
+	deliver := b.pending == p && !p.done && !p.resolved && gen == p.gen
+	if deliver {
+		p.resolved = true
+	}
+	b.mu.Unlock()
+	if deliver {
+		p.result <- smsPromptResult{err: err}
+	}
+	return err
 }
 
 // startStdin lazily starts the single process-wide stdin reader.
