@@ -74,7 +74,7 @@ func TestLoadValidation(t *testing.T) {
 	cases := map[string]string{
 		"missing keystore":  `device_id = "84B5B45FE73EC0036C3E97717308447F"`,
 		"bad device_id":     "keystore = \"k\"\ndevice_id = \"lowercasehex\"",
-		"bad platform":      "keystore = \"k\"\nplatform = \"mac\"",
+		"bad platform":      "keystore = \"k\"\nplatform = \"bad\\nvalue\"",
 		"bad dns":           "keystore = \"k\"\ndns = [\"dns.example.com\"]",
 		"bad log level":     "keystore = \"k\"\nlog_level = \"verbose\"",
 		"bad client type":   "keystore = \"k\"\nclient_type = \"desktop\"",

@@ -12,7 +12,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"geektrust/internal/privatefile"
+	"github.com/ShanghaitechGeekPie/geektrust/internal/privatefile"
 )
 
 // keystoreMagic prefixes every default-format keystore file

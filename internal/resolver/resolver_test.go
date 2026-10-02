@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"geektrust/internal/sdpc"
-	"geektrust/internal/session"
+	"github.com/ShanghaitechGeekPie/geektrust/internal/sdpc"
+	"github.com/ShanghaitechGeekPie/geektrust/internal/session"
 )
 
 func TestIsFakeIP(t *testing.T) {

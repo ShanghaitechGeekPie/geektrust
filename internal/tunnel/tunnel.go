@@ -22,7 +22,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"geektrust/internal/frame"
+	"github.com/ShanghaitechGeekPie/geektrust/internal/frame"
 )
 
 const (

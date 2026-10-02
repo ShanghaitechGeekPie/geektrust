@@ -16,7 +16,7 @@ import (
 	"syscall"
 	"time"
 
-	"geektrust/internal/session"
+	"github.com/ShanghaitechGeekPie/geektrust/internal/session"
 )
 
 const (
@@ -62,6 +62,14 @@ type tcpAuthRequest struct {
 		} `json:"application"`
 	} `json:"env"`
 	XRequestSig string `json:"xRequestSig"`
+}
+
+// TCPAuthError is an explicit gateway authentication rejection. It is terminal
+// across both gateway selection and stream-to-L3 compatibility fallback.
+type TCPAuthError struct{ Code int64 }
+
+func (e *TCPAuthError) Error() string {
+	return fmt.Sprintf("direct TCP protocol rejected request: code %d", e.Code)
 }
 
 // TCPStatusError is the gateway's SOCKS-style result for opening the target.
@@ -115,16 +123,17 @@ func ShouldFallbackToL3(err error) bool {
 	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
 	}
-	var status *TCPStatusError
-	if !errors.As(err, &status) {
-		return true
-	}
-	switch status.Status {
-	case 0x03, 0x04, 0x05, 0x06:
+	var rejected *TCPAuthError
+	if errors.As(err, &rejected) {
 		return false
-	default:
-		return true
 	}
+	var status *TCPStatusError
+	if errors.As(err, &status) {
+		return status.Status == 0x07 || status.Status == 0x08
+	}
+	// Only incomplete setup exchanges can indicate an unsupported stream path.
+	// TLS verification, authentication rejection and unknown failures are terminal.
+	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
 }
 
 // DialTCP opens an aTrust TCP proxy connection. TCP uses the server's stream
@@ -165,6 +174,10 @@ func (m *Manager) DialTCP(ctx context.Context, ip string, port int, appID, domai
 			return tunneled, nil
 		}
 		lastErr = err
+		var rejected *TCPAuthError
+		if errors.As(err, &rejected) {
+			return nil, err
+		}
 		var status *TCPStatusError
 		if errors.As(err, &status) && status.Status != 0x01 {
 			return nil, err
@@ -259,6 +272,14 @@ func buildTCPRequest(cred *session.Credential, ip string, port int, appID, domai
 		processName, processPath = "ssh", "/usr/bin/ssh"
 		fingerprint = fmt.Sprintf("%X", sha256.Sum256([]byte(processPath)))
 	}
+	processPlatform := "Linux"
+	if identity := cred.ProcessIdentity; identity != nil {
+		if err := identity.Validate(); err != nil {
+			return nil, err
+		}
+		processName, processPath, processPlatform = identity.Name, identity.Path, identity.Platform
+		fingerprint = fmt.Sprintf("%X", sha256.Sum256([]byte(processPath)))
+	}
 	req := tcpAuthRequest{
 		SID: cred.SID, AppID: appID, URL: "tcp://" + dest,
 		DeviceID: cred.DeviceID, ConnectionID: connectionID,
@@ -266,7 +287,7 @@ func buildTCPRequest(cred *session.Credential, ip string, port int, appID, domai
 	}
 	p := &req.Env.Application.Runtime.Process
 	*p = tcpProcess{
-		Name: processName, DigitalSignature: "TrustAppClosed", Platform: "Linux",
+		Name: processName, DigitalSignature: "TrustAppClosed", Platform: processPlatform,
 		Fingerprint: fingerprint, Description: "TrustAppClosed", Path: processPath,
 		Version: "TrustAppClosed", SecurityEnv: "normal",
 	}
@@ -341,7 +362,7 @@ func readTCPProtocolResponse(reader io.Reader) error {
 		return fmt.Errorf("decode direct TCP protocol response: %w", err)
 	}
 	if response.Code != 0 {
-		return fmt.Errorf("direct TCP protocol rejected request: code %d: %s", response.Code, response.Message)
+		return &TCPAuthError{Code: response.Code}
 	}
 	return nil
 }

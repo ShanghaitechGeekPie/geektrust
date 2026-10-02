@@ -11,7 +11,7 @@ import (
 	"strconv"
 	"strings"
 
-	"geektrust/internal/privatefile"
+	"github.com/ShanghaitechGeekPie/geektrust/internal/privatefile"
 )
 
 // InitOptions controls the initial config written by Initialize.
@@ -110,6 +110,15 @@ state_file = %s
 gateways = []
 dns = []
 log_level = %s
+login_domain = ""
+
+# Deployment-specific behavior is opt-in. See config.example.toml.
+[compatibility]
+fallback_app_id = ""
+fallback_gateways = []
+gateway_server_name = ""
+missing_gateway_group_fallback = false
+tcp_to_l3_fallback = false
 
 [inbound.socks5]
 enabled = true

@@ -16,7 +16,7 @@ import (
 	"sync"
 	"time"
 
-	"geektrust/internal/resolver"
+	"github.com/ShanghaitechGeekPie/geektrust/internal/resolver"
 )
 
 const connectUDPPathPrefix = "/.well-known/masque/udp/"

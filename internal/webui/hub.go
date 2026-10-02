@@ -9,8 +9,8 @@ import (
 	"sync"
 	"time"
 
-	"geektrust/internal/config"
-	"geektrust/internal/session"
+	"github.com/ShanghaitechGeekPie/geektrust/internal/config"
+	"github.com/ShanghaitechGeekPie/geektrust/internal/session"
 )
 
 // Panel states (§6.1 of docs/WEBUI.md).

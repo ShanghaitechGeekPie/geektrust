@@ -5,7 +5,7 @@ import (
 	"regexp"
 	"time"
 
-	"geektrust/internal/sdpc"
+	"github.com/ShanghaitechGeekPie/geektrust/internal/sdpc"
 )
 
 // EventKind identifies a session lifecycle event.

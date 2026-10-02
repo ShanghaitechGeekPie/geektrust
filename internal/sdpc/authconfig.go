@@ -18,7 +18,7 @@ type AuthConfig struct {
 
 // AuthConfig fetches /passport/v1/public/authConfig and stores the csrf token
 // for subsequent calls.
-func (c *Client) AuthConfig(ctx context.Context) (*AuthConfig, error) {
+func (c *Client) AuthConfig(ctx context.Context, selectCASDomain bool) (*AuthConfig, error) {
 	var data struct {
 		AuthServerInfoList []struct {
 			AuthType    string `json:"authType"`
@@ -43,7 +43,7 @@ func (c *Client) AuthConfig(ctx context.Context) (*AuthConfig, error) {
 		return nil, &APIError{Op: "authConfig", Code: -1, Message: "response missing security.csrfToken"}
 	}
 	c.csrf = data.Security.CsrfToken
-	if c.LoginDomain == "" {
+	if selectCASDomain && c.LoginDomain == "" {
 		var selected string
 		for _, method := range data.AuthServerInfoList {
 			if method.AuthType != "auth/cas" || method.LoginDomain == "" {

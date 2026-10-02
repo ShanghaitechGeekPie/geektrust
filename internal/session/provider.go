@@ -11,9 +11,11 @@ import (
 	"sync"
 	"time"
 
-	"geektrust/internal/config"
-	"geektrust/internal/idsauth"
-	"geektrust/internal/sdpc"
+	"github.com/ShanghaitechGeekPie/geektrust/auth"
+	"github.com/ShanghaitechGeekPie/geektrust/deployment"
+	"github.com/ShanghaitechGeekPie/geektrust/internal/config"
+	"github.com/ShanghaitechGeekPie/geektrust/internal/idsauth"
+	"github.com/ShanghaitechGeekPie/geektrust/internal/sdpc"
 )
 
 // errSMSAuthSessionExpired marks an expiration discovered after the user has
@@ -23,19 +25,21 @@ var errSMSAuthSessionExpired = errors.New("SMS authentication session expired")
 
 // Credential is everything the tunnel and resolver need from a live session.
 type Credential struct {
+	ProcessIdentity *deployment.ProcessIdentity
 	// AppID is the legacy fallback; matched resource rules always take priority.
-	AppID           string
-	LegacyRouting   bool
-	GatewayOverride bool
-	Original        *Credential
-	SID             string
-	DeviceID        string
-	Username        string
-	ConnectionID    string
-	CsrfToken       string
-	Cookies         []*http.Cookie
-	Gateways        []string
-	DNS             []string
+	AppID                       string
+	MissingGatewayGroupFallback bool
+	GatewayOverride             bool
+	AllowTCPFallback            bool
+	Original                    *Credential
+	SID                         string
+	DeviceID                    string
+	Username                    string
+	ConnectionID                string
+	CsrfToken                   string
+	Cookies                     []*http.Cookie
+	Gateways                    []string
+	DNS                         []string
 	// Policy is the full routing policy (domain/IP/CIDR × port → appId)
 	// from clientResource.
 	Policy *sdpc.Resource
@@ -62,13 +66,15 @@ type CredentialProvider interface {
 // credentials, restoring a persisted session or re-logging in silently
 // when the controller does not request SMS.
 type Provider struct {
-	cfg          *config.Config
-	logger       *slog.Logger
-	prompt       SMSPrompter
-	smsHandler   SMSHandler // set by SetSMSHandler during web wiring
-	store        StateStore
-	Authenticate func(context.Context, *http.Client) (string, error)
-	Transport    http.RoundTripper
+	cfg              *config.Config
+	logger           *slog.Logger
+	prompt           SMSPrompter
+	smsHandler       SMSHandler // set by SetSMSHandler during web wiring
+	store            StateStore
+	Authenticate     func(context.Context, *http.Client) (string, error)
+	ControllerLogin  auth.ControllerLogin
+	ChallengeHandler auth.Handler
+	Transport        http.RoundTripper
 
 	mu         sync.Mutex
 	cur        *Credential
@@ -99,7 +105,7 @@ type refreshCall struct {
 // requires SMS then returns an error.
 func NewProvider(cfg *config.Config, logger *slog.Logger, prompt SMSPrompter) *Provider {
 	normalized := *cfg
-	normalized.ApplyControllerDefaults()
+	normalized.Compatibility = cfg.Compatibility.Clone()
 	cfg = &normalized
 	return &Provider{
 		cfg:    cfg,
@@ -470,7 +476,7 @@ func (p *Provider) restore(ctx context.Context) (*Credential, *SessionInfo, erro
 	if !info.IsOnline {
 		return nil, nil, errors.New("persisted session is offline")
 	}
-	cred, err := p.finishLogin(ctx, sc, st.Gateways, info.Username)
+	cred, err := p.finishLogin(ctx, sc, info.Username)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -514,6 +520,31 @@ func (p *Provider) login(ctx context.Context) (*Credential, *SessionInfo, error)
 func (p *Provider) loginOnce(ctx context.Context) (*Credential, *SessionInfo, error) {
 	jar, _ := cookiejar.New(nil)
 	hc := &http.Client{Jar: jar, Timeout: 30 * time.Second, Transport: p.Transport}
+	if p.ControllerLogin != nil {
+		sc := p.newSDPC(hc)
+		if _, err := sc.AuthConfig(ctx, false); err != nil {
+			return nil, nil, err
+		}
+		request := auth.ControllerRequest{URL: p.cfg.BaseURL, DeviceID: p.cfg.DeviceID, Platform: p.cfg.Platform, ClientType: sc.ClientType, LoginDomain: sc.LoginDomain, CSRFToken: sc.CSRF()}
+		if err := p.ControllerLogin(ctx, hc, request); err != nil {
+			return nil, nil, err
+		}
+		if sc.SID() == "" {
+			return nil, nil, errors.New("controller authentication did not establish a session")
+		}
+		info, err := sc.OnlineInfo(ctx)
+		if err != nil {
+			return nil, nil, err
+		}
+		if !info.IsOnline {
+			return nil, nil, errors.New("controller authentication reports offline")
+		}
+		cred, err := p.finishLogin(ctx, sc, info.Username)
+		if err != nil {
+			return nil, nil, err
+		}
+		return cred, newSessionInfo(info, cred, p.cfg.ClientType), nil
+	}
 	authenticate := p.Authenticate
 	if authenticate == nil {
 		authenticate = func(ctx context.Context, hc *http.Client) (string, error) {
@@ -531,7 +562,7 @@ func (p *Provider) loginOnce(ctx context.Context) (*Credential, *SessionInfo, er
 		return nil, nil, fmt.Errorf("identity authentication: %w", err)
 	}
 	sc := p.newSDPC(hc)
-	ac, err := sc.AuthConfig(ctx)
+	ac, err := sc.AuthConfig(ctx, true)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -582,7 +613,7 @@ func (p *Provider) loginOnce(ctx context.Context) (*Credential, *SessionInfo, er
 			p.logger.Info("device bound as trusted terminal")
 		}
 	}
-	cred, err := p.finishLogin(ctx, sc, nil, info.Username)
+	cred, err := p.finishLogin(ctx, sc, info.Username)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -591,8 +622,8 @@ func (p *Provider) loginOnce(ctx context.Context) (*Credential, *SessionInfo, er
 
 // smsFlow completes controller-requested SMS verification.
 func (p *Provider) smsFlow(ctx context.Context, sc *sdpc.Client) (string, error) {
-	if p.smsHandler == nil && p.prompt == nil {
-		return "", errors.New("the controller requires SMS verification, but no prompt is available")
+	if p.smsHandler == nil && p.prompt == nil && p.ChallengeHandler == nil {
+		return "", &auth.RequiredError{Challenge: auth.Challenge{Method: "auth/sms"}}
 	}
 	if err := sc.SendSMS(ctx); err != nil {
 		// 75500401: a code was already sent and is still valid — verify it
@@ -605,7 +636,16 @@ func (p *Provider) smsFlow(ctx context.Context, sc *sdpc.Client) (string, error)
 	}
 	var code string
 	var promptErr error
-	if p.smsHandler != nil {
+	if p.ChallengeHandler != nil {
+		challengeCtx, cancel := context.WithTimeout(ctx, time.Minute)
+		defer cancel()
+		ctx = challengeCtx
+		expires, _ := challengeCtx.Deadline()
+		code, promptErr = p.ChallengeHandler(challengeCtx, auth.Challenge{Method: "auth/sms", ExpiresAt: expires})
+		if err := challengeCtx.Err(); err != nil {
+			return "", err
+		}
+	} else if p.smsHandler != nil {
 		// Keep typed controller errors for the web layer. An expired auth
 		// session also carries the private restart marker consumed by login.
 		resendFn := func(ctx context.Context) error {
@@ -633,8 +673,8 @@ func (p *Provider) smsFlow(ctx context.Context, sc *sdpc.Client) (string, error)
 }
 
 // finishLogin pulls clientResource, assembles the Credential and persists the
-// state file. gatewaysOverride comes from the persisted state (if any).
-func (p *Provider) finishLogin(ctx context.Context, sc *sdpc.Client, gatewaysOverride []string, username string) (*Credential, error) {
+// state file. Routing always uses the current policy and explicit configuration.
+func (p *Provider) finishLogin(ctx context.Context, sc *sdpc.Client, username string) (*Credential, error) {
 	res, err := sc.ClientResource(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("clientResource: %w", err)
@@ -645,11 +685,8 @@ func (p *Provider) finishLogin(ctx context.Context, sc *sdpc.Client, gatewaysOve
 	if len(gateways) == 0 {
 		gateways = res.Gateways
 	}
-	if len(gateways) == 0 && len(gatewaysOverride) > 0 {
-		gateways = gatewaysOverride
-	}
-	if len(gateways) == 0 && p.cfg.IsShanghaiTech() {
-		gateways = []string{"119.78.254.241:441", "59.78.171.241:441"}
+	if len(gateways) == 0 {
+		gateways = append([]string(nil), p.cfg.Compatibility.FallbackGateways...)
 	}
 	if len(gateways) == 0 {
 		return nil, fmt.Errorf("controller supplied no gateway addresses")
@@ -660,18 +697,20 @@ func (p *Provider) finishLogin(ctx context.Context, sc *sdpc.Client, gatewaysOve
 	}
 
 	cred := &Credential{
-		AppID:           p.cfg.AppID,
-		LegacyRouting:   p.cfg.IsShanghaiTech(),
-		GatewayOverride: len(p.cfg.Gateways) != 0,
-		SID:             sc.SID(),
-		DeviceID:        p.cfg.DeviceID,
-		Username:        username,
-		ConnectionID:    fmt.Sprintf("%X-%d", md5.Sum([]byte(p.cfg.DeviceID)), time.Now().UnixMicro()),
-		CsrfToken:       sc.CSRF(),
-		Cookies:         sc.Cookies(),
-		Gateways:        gateways,
-		DNS:             dns,
-		Policy:          res,
+		ProcessIdentity:             p.cfg.Compatibility.ProcessIdentity,
+		AppID:                       p.cfg.Compatibility.FallbackAppID,
+		MissingGatewayGroupFallback: p.cfg.Compatibility.MissingGatewayGroupFallback,
+		AllowTCPFallback:            p.cfg.Compatibility.TCPToL3Fallback,
+		GatewayOverride:             len(p.cfg.Gateways) != 0,
+		SID:                         sc.SID(),
+		DeviceID:                    p.cfg.DeviceID,
+		Username:                    username,
+		ConnectionID:                fmt.Sprintf("%X-%d", md5.Sum([]byte(p.cfg.DeviceID)), time.Now().UnixMicro()),
+		CsrfToken:                   sc.CSRF(),
+		Cookies:                     sc.Cookies(),
+		Gateways:                    gateways,
+		DNS:                         dns,
+		Policy:                      res,
 	}
 
 	records := make([]CookieRecord, 0, len(cred.Cookies))
