@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strconv"
 	"strings"
@@ -108,6 +109,9 @@ func ValidatePasskey(b []byte) error {
 }
 
 type Options struct {
+	// CheckTarget may reject a resolved IPv4 destination before transport opens.
+	// It is called concurrently and cannot grant access outside controller policy.
+	CheckTarget           func(netip.Addr) error
 	Compatibility         deployment.Compatibility
 	Gateways              []string
 	DNS                   []string
@@ -162,17 +166,18 @@ var ErrDatagramTooLarge = errors.New("UDP datagram exceeds tunnel MTU")
 var ErrDenied = errors.New("target is not authorized by controller policy")
 
 type Client struct {
-	provider  *session.Provider
-	manager   *tunnel.Manager
-	dialer    *l3.Dialer
-	resolver  *resolver.Resolver
-	ctx       context.Context
-	cancel    context.CancelFunc
-	mu        sync.Mutex
-	closed    bool
-	conns     map[*ownedConn]struct{}
-	transport *http.Transport
-	events    chan Event
+	checkTarget func(netip.Addr) error
+	provider    *session.Provider
+	manager     *tunnel.Manager
+	dialer      *l3.Dialer
+	resolver    *resolver.Resolver
+	ctx         context.Context
+	cancel      context.CancelFunc
+	mu          sync.Mutex
+	closed      bool
+	conns       map[*ownedConn]struct{}
+	transport   *http.Transport
+	events      chan Event
 }
 
 func New(opts Options) (*Client, error) {
@@ -234,7 +239,7 @@ func New(opts Options) (*Client, error) {
 	m.GatewayTrustStore = opts.GatewayTrustStore
 	d := &l3.Dialer{Manager: m, Provider: p, Logger: opts.Logger}
 	ctx, cancel := context.WithCancel(context.Background())
-	c := &Client{transport: ownedTransport, provider: p, manager: m, dialer: d, resolver: resolver.NewWithDialerOptions(p, d, opts.DialContext, opts.DisableSystemResolver), ctx: ctx, cancel: cancel, conns: make(map[*ownedConn]struct{}), events: make(chan Event, 16)}
+	c := &Client{checkTarget: opts.CheckTarget, transport: ownedTransport, provider: p, manager: m, dialer: d, resolver: resolver.NewWithDialerOptions(p, d, opts.DialContext, opts.DisableSystemResolver), ctx: ctx, cancel: cancel, conns: make(map[*ownedConn]struct{}), events: make(chan Event, 16)}
 	p.AddObserver(clientObserver{c})
 	go p.CheckLoop(ctx, 5*time.Minute)
 	return c, nil
@@ -355,6 +360,15 @@ func (c *Client) DialContext(parent context.Context, network, address string) (n
 	}
 	if target.AppID == "" {
 		return nil, ErrDenied
+	}
+	if c.checkTarget != nil {
+		ip, err := netip.ParseAddr(target.IP)
+		if err != nil {
+			return nil, err
+		}
+		if err := c.checkTarget(ip.Unmap()); err != nil {
+			return nil, err
+		}
 	}
 	var conn net.Conn
 	if protocol == "tcp" {
