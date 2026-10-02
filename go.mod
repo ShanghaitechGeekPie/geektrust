@@ -1,4 +1,4 @@
-module geektrust
+module github.com/ShanghaitechGeekPie/geektrust
 
 go 1.24.13
 

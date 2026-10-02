@@ -14,7 +14,7 @@ import (
 
 	"golang.org/x/net/dns/dnsmessage"
 
-	"geektrust/internal/idsauth"
+	"github.com/ShanghaitechGeekPie/geektrust/internal/idsauth"
 )
 
 type testGatewayPins struct {

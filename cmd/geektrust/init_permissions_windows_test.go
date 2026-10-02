@@ -11,7 +11,7 @@ import (
 
 	"golang.org/x/sys/windows"
 
-	"geektrust/internal/config"
+	"github.com/ShanghaitechGeekPie/geektrust/internal/config"
 )
 
 // Only call this on fixtures created by the test, never user directories.

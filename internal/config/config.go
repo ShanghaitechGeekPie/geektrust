@@ -4,12 +4,14 @@ package config
 import (
 	"fmt"
 	"net"
-	"net/url"
 	"os"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/BurntSushi/toml"
+
+	"github.com/ShanghaitechGeekPie/geektrust/deployment"
 )
 
 // DefaultDeviceID is the legacy shared browser-mode identifier. It remains
@@ -20,29 +22,24 @@ const DefaultDeviceID = "84B5B45FE73EC0036C3E97717308447F"
 // DefaultBaseURL is the ShanghaiTech aTrust controller.
 const DefaultBaseURL = "https://vpn.shanghaitech.edu.cn"
 
-// DefaultAppID preserves the legacy ShanghaiTech fallback for incomplete policies.
-const DefaultAppID = "681165d0-1c77-11ed-8650-cd35a51aa42a"
-
-const DefaultLoginDomain = "Shanghaitech.edu.cn"
-
 // DefaultWebListen is the default loopback address of the status panel.
 const DefaultWebListen = "127.0.0.1:8081"
 
 // Config is the top-level configuration.
 type Config struct {
-	Keystore    string    `toml:"keystore"`
-	DeviceID    string    `toml:"device_id"`
-	BaseURL     string    `toml:"base_url"`
-	Platform    string    `toml:"platform"`
-	ClientType  string    `toml:"client_type"`
-	AppID       string    `toml:"app_id"`
-	LoginDomain string    `toml:"login_domain"`
-	Gateways    []string  `toml:"gateways"`
-	DNS         []string  `toml:"dns"`
-	StateFile   string    `toml:"state_file"`
-	LogLevel    string    `toml:"log_level"`
-	Inbound     Inbound   `toml:"inbound"`
-	Web         WebConfig `toml:"web"`
+	Compatibility deployment.Compatibility `toml:"compatibility"`
+	Keystore      string                   `toml:"keystore"`
+	DeviceID      string                   `toml:"device_id"`
+	BaseURL       string                   `toml:"base_url"`
+	Platform      string                   `toml:"platform"`
+	ClientType    string                   `toml:"client_type"`
+	LoginDomain   string                   `toml:"login_domain"`
+	Gateways      []string                 `toml:"gateways"`
+	DNS           []string                 `toml:"dns"`
+	StateFile     string                   `toml:"state_file"`
+	LogLevel      string                   `toml:"log_level"`
+	Inbound       Inbound                  `toml:"inbound"`
+	Web           WebConfig                `toml:"web"`
 }
 
 // Inbound holds the proxy listener configuration.
@@ -78,8 +75,12 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("read config: %w", err)
 	}
 	var cfg Config
-	if err := toml.Unmarshal(data, &cfg); err != nil {
+	meta, err := toml.Decode(string(data), &cfg)
+	if err != nil {
 		return nil, fmt.Errorf("parse config %s: %w", path, err)
+	}
+	if keys := meta.Undecoded(); len(keys) != 0 {
+		return nil, fmt.Errorf("unknown configuration field %s", keys[0])
 	}
 	cfg.applyDefaults()
 	if err := cfg.validate(); err != nil {
@@ -109,13 +110,15 @@ func (c *Config) applyDefaults() {
 		c.ClientType = "browser"
 	}
 	c.BaseURL = strings.TrimRight(c.BaseURL, "/")
-	c.ApplyControllerDefaults()
 	if c.Web.Listen == "" {
 		c.Web.Listen = DefaultWebListen
 	}
 }
 
 func (c *Config) validate() error {
+	if err := c.Compatibility.Validate(); err != nil {
+		return err
+	}
 	if c.Keystore == "" {
 		return fmt.Errorf("keystore path is required")
 	}
@@ -125,9 +128,9 @@ func (c *Config) validate() error {
 	if !strings.HasPrefix(c.BaseURL, "https://") && !strings.HasPrefix(c.BaseURL, "http://") {
 		return fmt.Errorf("base_url must be an http(s) URL, got %q", c.BaseURL)
 	}
-	// platform is case sensitive server-side; catch the common mistakes early.
-	if c.Platform != "Mac" {
-		return fmt.Errorf("platform must be exactly \"Mac\" (case sensitive), got %q", c.Platform)
+	// Platform is a server-defined, case-sensitive protocol value, not GOOS.
+	if len(c.Platform) > 64 || strings.IndexFunc(c.Platform, unicode.IsControl) >= 0 {
+		return fmt.Errorf("platform must be at most 64 bytes without control characters")
 	}
 	for i, gw := range c.Gateways {
 		host, port, err := SplitHostPort(gw)
@@ -236,30 +239,7 @@ func SplitHostPort(addr string) (host string, port string, err error) {
 	return host, port, nil
 }
 
-// IsShanghaiTech limits legacy fallbacks to the original supported controller.
-func (c *Config) IsShanghaiTech() bool {
-	u, err := url.Parse(c.BaseURL)
-	return err == nil && strings.EqualFold(u.Hostname(), "vpn.shanghaitech.edu.cn")
-}
-
-// ApplyControllerDefaults also applies when the configuration is built by the client package.
-func (c *Config) ApplyControllerDefaults() {
-	if !c.IsShanghaiTech() {
-		return
-	}
-	if c.AppID == "" {
-		c.AppID = DefaultAppID
-	}
-	if c.LoginDomain == "" {
-		c.LoginDomain = DefaultLoginDomain
-	}
-}
-
-// GatewayServerName preserves the certificate identity used by ShanghaiTech's
-// IP-addressed gateways without disabling certificate verification.
+// GatewayServerName returns an explicit TLS certificate identity override.
 func (c *Config) GatewayServerName() string {
-	if c.IsShanghaiTech() {
-		return "vpn.shanghaitech.edu.cn"
-	}
-	return ""
+	return c.Compatibility.GatewayServerName
 }

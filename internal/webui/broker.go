@@ -10,7 +10,7 @@ import (
 	"strings"
 	"sync"
 
-	"geektrust/internal/sdpc"
+	"github.com/ShanghaitechGeekPie/geektrust/internal/sdpc"
 )
 
 // ErrNoPending is returned by claims and resends when no SMS verification is

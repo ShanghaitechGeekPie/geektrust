@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"geektrust/internal/config"
+	"github.com/ShanghaitechGeekPie/geektrust/internal/config"
 )
 
 func TestBuildVersion(t *testing.T) {

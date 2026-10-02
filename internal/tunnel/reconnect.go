@@ -12,8 +12,8 @@ import (
 	"sync"
 	"time"
 
-	"geektrust/internal/frame"
-	"geektrust/internal/session"
+	"github.com/ShanghaitechGeekPie/geektrust/internal/frame"
+	"github.com/ShanghaitechGeekPie/geektrust/internal/session"
 )
 
 const (

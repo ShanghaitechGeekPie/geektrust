@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"geektrust/internal/session"
+	"github.com/ShanghaitechGeekPie/geektrust/internal/session"
 )
 
 type TunnelDialer interface {
