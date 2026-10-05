@@ -29,7 +29,7 @@ keystore = "./ids-passkey.keystore"
 
 # [storage]
 # directory = ""     # 缺省使用平台用户私有持久目录
-# legacy_state = ""  # 仅用于保留既有加密会话路径，不删除原缓存和密钥
+# state_file = ""    # 留空使用 directory/session.enc；非空覆盖会话文件读写路径
 
 # [logging]
 # level = "info"

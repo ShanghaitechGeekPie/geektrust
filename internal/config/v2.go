@@ -49,8 +49,10 @@ type FileV2 struct {
 		Servers  []string `toml:"servers"`
 	} `toml:"dns"`
 	Storage struct {
-		Directory   string `toml:"directory"`
-		LegacyState string `toml:"legacy_state"`
+		Directory string `toml:"directory"`
+		StateFile string `toml:"state_file"`
+		// LegacyState is a read-compatible alias; new output uses state_file.
+		LegacyState string `toml:"legacy_state,omitempty"`
 	} `toml:"storage"`
 	Logging struct {
 		Level string `toml:"level"`
@@ -152,8 +154,15 @@ func loadV2(path string, data []byte) (*Config, error) {
 	if cfg.LoginDomain == "" {
 		cfg.LoginDomain = v.LoginDomain
 	}
-	if f.Storage.LegacyState != "" {
-		cfg.StateFile = resolve(f.Storage.LegacyState)
+	stateFile := resolve(f.Storage.StateFile)
+	legacyState := resolve(f.Storage.LegacyState)
+	if meta.IsDefined("storage", "state_file") && meta.IsDefined("storage", "legacy_state") && stateFile != legacyState {
+		return nil, errors.New("conflicting storage.state_file and storage.legacy_state")
+	}
+	if stateFile != "" {
+		cfg.StateFile = stateFile
+	} else if legacyState != "" {
+		cfg.StateFile = legacyState
 	}
 	cfg.Gateways = f.Routing.GatewayFilter
 	if f.Routing.FallbackAppID != "" {
@@ -285,7 +294,7 @@ func Migration(path string) ([]byte, error) {
 	if e != nil {
 		return nil, e
 	}
-	f.Storage.LegacyState, e = filepath.Abs(c.StateFile)
+	f.Storage.StateFile, e = filepath.Abs(c.StateFile)
 	if e != nil {
 		return nil, e
 	}

@@ -83,7 +83,7 @@
 
 - **Query 参数**(缺失或大小写错误会返回 400/422):
   - `clientType`:浏览器路径用 `SDPBrowserClient`(桌面路径用 `SDPClient`)。
-  - `platform`:**大小写敏感,必须为 `Mac`**。`Macintosh` 会报 `10000001 invalid_param in query`;`mac`(全小写)会报 422。
+  - `platform`:**大小写敏感,默认使用 `Mac`**。2026-10-06 实测上科大和 ECNU 的 `/passport/v1/public/authConfig` 均接受 `Mac`、`Windows`、`Linux`(HTTP 200、业务码 0);这不代表已验证完整登录和隧道流程。历史记录中,`Macintosh` 报 `10000001 invalid_param in query`,`mac`(全小写)报 422。
   - `lang`:`zh-CN`。
 - **请求头**:
   - `x-csrf-token: <csrfToken>`(必带)。

@@ -116,7 +116,7 @@ device_id = %s
 keystore = %s
 
 [storage]
-legacy_state = %s
+state_file = %s
 `, strconv.Quote(cfg.ClientType), strconv.Quote(cfg.DeviceID), strconv.Quote(key), strconv.Quote(state)))
 }
 
