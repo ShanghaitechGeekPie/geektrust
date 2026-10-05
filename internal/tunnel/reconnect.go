@@ -397,7 +397,7 @@ func (m *Manager) ForApp(ctx context.Context, appID string) (*Manager, error) {
 		return nil, errors.New("missing resource policy")
 	}
 	group := c.GatewayGroupForApp(appID)
-	if group == "" {
+	if group == "" && sameGatewayAddresses(c.Gateways, c.GatewaysForGroup("")) {
 		return m, nil
 	}
 	m.groupsMu.Lock()
@@ -422,4 +422,16 @@ func (m *Manager) ForApp(ctx context.Context, appID string) (*Manager, error) {
 	}
 	m.groupsMu.Unlock()
 	return g, nil
+}
+
+func sameGatewayAddresses(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }

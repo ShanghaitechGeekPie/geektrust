@@ -1,39 +1,37 @@
 # client
 
-`client` 封装认证、会话、资源解析和 TCP/UDP 连接，供其他 Go 项目直接引用。
-它不启动代理监听器，也不创建 TUN 或修改系统路由、DNS。
+`client` 提供可嵌入的 aTrust 会话、连接、解析和状态接口。CLI、Web 和 SDK 共用一个内部运行核心。SDK 不创建 TUN、代理监听器或文件目录，不修改系统路由、DNS 或 ACL。
 
 ```go
-import "github.com/ShanghaitechGeekPie/geektrust/client"
+import (
+    "github.com/ShanghaitechGeekPie/geektrust/auth"
+    "github.com/ShanghaitechGeekPie/geektrust/client"
+)
 
+identity, err := auth.NewPasskey(credentials)
+if err != nil { return err }
 c, err := client.New(client.Options{
     ControllerURL: controllerURL,
-    DeviceID:      deviceID,
-    Authenticator: &client.PasskeyAuthenticator{Store: credentials},
-    SessionStore:  sessions,
+    DeviceID: deviceID,
+    Auth: client.AuthOptions{Identity: identity, OnChallenge: prompt},
+    SessionStore: sessions,
 })
 if err != nil { return err }
 defer c.Close()
-
 if _, err := c.Connect(ctx); err != nil { return err }
 conn, err := c.DialContext(ctx, "tcp", address)
 if err != nil { return err }
 defer conn.Close()
 ```
 
-- `ControllerURL` 必须是 HTTPS origin（不带路径、查询参数）。`DeviceID` 是持久保存的 32 位大写十六进制标识，可用 `NewDeviceID` 生成。
-- `ClientMode` 默认为 false，即 browser 模式；设为 true 后，首次短信验证成功时会尝试绑定授信终端。
-- `BlobStore` 收到的是凭据或会话的明文字节，调用方负责保密、原子写入和持久化。同一 passkey 使用同一认证器串行更新计数器；保存失败不会提交断言。
-- 认证遵循调用方的 context，允许等待短信输入；网络连接和解析设有超时。连接建立后，用 `SetDeadline` 控制读写。`Close` 会取消操作并关闭自有连接。
-- TCP 优先遵循服务端 L3 偏好，否则先尝试流式 TCP；仅显式设置 `Compatibility.TCPToL3Fallback` 后，网关明确不支持流式命令或在建立阶段提前关闭时才可退回 L3，明确的目标拒绝和取消不会触发回退。
-- 所有控制器均默认严格模式，不按域名推断兼容行为。`Options.Compatibility` 使用公开的 `deployment.Compatibility`，与 TOML `[compatibility]` 字段一一对应；可分别配置应用 ID、缺失网关地址、TLS 域名、缺失网关组和 TCP→L3 回退。网关列表只筛选已分配线路，不覆盖非空的网关组。删除或关闭选项后，新客户端立即采用严格行为，缓存会话不会恢复旧的兜底地址。
-- `LoginDomain` 显式选择 CAS 域；默认从控制器发现。`ControllerLogin` 可替换整个控制器登录流程，通过共享 HTTP CookieJar 建立会话，SDK 随后检查在线状态和资源。`ChallengeHandler` 接收带到期时间的短信验证请求；未提供交互处理器返回 `auth.ErrRequired`，未知认证方式返回 `auth.ErrUnsupported`。
-- 默认 TLS 验证 CA。`GatewayTrustStore` 是显式启用的私有证书 TOFU 兜底，正常 CA 验证通过时不强制检查已有 pin；调用方负责持久保存 pin。
-- UDP 保留数据报边界，payload 上限为 1372 字节。`ExchangePacket` 仅支持未分片 IPv4 ICMP Echo；实际可用性取决于控制器授权和网关支持。IPv6 目标未实现。
+`credentials` 实现 `auth.CredentialStore`；`sessions` 实现按 `client.SessionScope` 分开的 `Load`、`Save`、`Delete`。Save 必须原子且持久。SDK 会再次核对缓存归属，拒绝将旧 Cookie 发给另一控制器或身份。设备 ID 由宿主持久保存。
 
-`Info.Implemented` 仅表示库已经实现的协议能力；`Resources` 表示控制器下发的授权范围，
-`OpenTransport` 返回已建立线路和实际分配的 IPv4 地址。它们均不保证任意目标可达。
-`Compatibility.ProcessIdentity` 可以覆盖流式 TCP 和 L3 的进程名、平台和路径，并统一重新计算指纹。
-未配置时保留各自已实现的协议元数据；这些值与宿主操作系统无关，不代表平台连接验证结果。
+`New` 只检查和复制设置。`Connect`、`Authenticate` 可以发起短信交互；后台、数据连接和解析遇到短信要求时返回 `auth.ErrInteractionRequired`。挑战区分本地 `Deadline` 和服务端 `ServerExpiresAt`，提供限生命周期的 `Resend`。不提供完整控制器登录替换钩子。
 
-`Options.CheckTarget` 可在解析出真实 IPv4 地址后、打开目标传输前执行调用方的路由限制；同样适用于 ICMP。回调必须支持并发调用，只能进一步限制访问，不能扩大控制器授权范围。库本身不决定系统路由。
+部署默认为 `deployment.Auto`。上科大的已验证 TLS 身份和缺字段补充由内部适配提供；未知控制器采用 `Generic`。`Fallbacks=nil` 使用部署默认，`&deployment.Fallbacks{}` 关闭全部兜底。TLS 设置放在 `Network.GatewayTLS`，正常 CA 验证成功时不强制检查 pin；未知 CA 的兜底需要原子的 `CheckOrEnroll`，并继续验证证书身份和有效期。
+
+SDK 默认仅使用控制器 DNS；额外来源由 `DNS.FallbackLookup` 明确提供。CLI 的 `auto` 顺序在命令转换层保留。`Network.AllowedGateways=nil` 不额外限制，显式空列表拒绝全部线路。`CheckTarget` 收到地址、协议、端口和代；`DNSQueryTarget` 区分基础 DNS 查询，只能收紧访问权限。
+
+`Status` 返回安全快照；`Subscribe(ctx)` 为每个订阅者提供独立有界队列，慢订阅者不会阻塞连接。`ImplementedCapabilities()` 表示 SDK 实现范围，不代表资源授权或目标连通。`ExchangeICMPEcho` 仅支持未分片 IPv4 Echo，UDP 保留数据报边界，payload 上限为 1372 字节。IPv6 目标未实现。
+
+`Close` 取消并关闭自有对象，`Shutdown(ctx)` 等待自有任务，支持超时。宿主提供的 transport、身份和存储对象由宿主管理。旧会话的连接不跨代重放数据，宿主负责重连。

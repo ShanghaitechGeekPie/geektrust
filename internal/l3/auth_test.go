@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ShanghaitechGeekPie/geektrust/deployment"
+	"github.com/ShanghaitechGeekPie/geektrust/internal/settings"
 )
 
 func TestBuildAuthRequestIPShape(t *testing.T) {
@@ -165,7 +165,7 @@ func TestBuildAuthRequestICMP(t *testing.T) {
 }
 
 func TestConfiguredProcessIdentity(t *testing.T) {
-	identity := &deployment.ProcessIdentity{Name: "custom-client", Platform: "Windows", Path: "custom-client.exe"}
+	identity := &settings.ProcessIdentity{Name: "custom-client", Platform: "Windows", Path: "custom-client.exe"}
 	body, err := buildAuthRequestIP("sid", "app", "device", "192.0.2.1", 443, net.IPv4(10, 0, 0, 1), 30000, 1, "", protocolTCP, identity)
 	if err != nil {
 		t.Fatal(err)

@@ -41,7 +41,7 @@ func TestBestRequiresGatewayTLS(t *testing.T) {
 	roots := x509.NewCertPool()
 	roots.AddCert(tlsServer.Certificate())
 	lines.TLSConfig = &tls.Config{RootCAs: roots}
-	got, err := lines.Best(ctx)
+	got, err := lines.bestForTest(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,7 +61,7 @@ func TestGatewayTLSRejectsUntrustedCertificateByDefault(t *testing.T) {
 	addr := strings.TrimPrefix(server.URL, "https://")
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	if _, err := NewLines([]string{addr}).Best(ctx); err == nil {
+	if _, err := NewLines([]string{addr}).bestForTest(ctx); err == nil {
 		t.Fatal("untrusted gateway certificate was accepted")
 	}
 }
@@ -91,17 +91,17 @@ func TestGatewayTrustOnFirstUsePinsPublicKey(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	newLines := func() *Lines { l := NewLines([]string{addr}); l.GatewayTrustStore = store; return l }
-	if _, err := newLines().Best(ctx); err != nil {
+	if _, err := newLines().bestForTest(ctx); err != nil {
 		t.Fatal(err)
 	}
 	if pin, _ := store.LoadPin(ctx, addr); len(pin) != 32 {
 		t.Fatal("gateway public key was not persisted")
 	}
-	if _, err := newLines().Best(ctx); err != nil {
+	if _, err := newLines().bestForTest(ctx); err != nil {
 		t.Fatalf("matching gateway pin rejected: %v", err)
 	}
 	store.SavePin(ctx, addr, make([]byte, 32))
-	if _, err := newLines().Best(ctx); err == nil || !strings.Contains(err.Error(), "public key changed") {
+	if _, err := newLines().bestForTest(ctx); err == nil || !strings.Contains(err.Error(), "public key changed") {
 		t.Fatalf("changed gateway key accepted: %v", err)
 	}
 }
@@ -178,4 +178,12 @@ func TestAllLinesTriedIncludesRecentTLSFailures(t *testing.T) {
 	if lines.allLinesTried(tried) {
 		t.Fatal("expired TLS failure must be attempted again")
 	}
+}
+
+func (l *Lines) bestForTest(ctx context.Context) (string, error) {
+	conn, addr, err := l.DialTLS(ctx)
+	if conn != nil {
+		conn.Close()
+	}
+	return addr, err
 }

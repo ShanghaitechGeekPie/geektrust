@@ -11,7 +11,7 @@ function deviceLabel(d: TrustDeviceEntry): string {
 
 const LIST_ERRORS: Record<number, string> = {
   503: "会话未就绪，请稍后重试",
-  409: "browser 模式不能绑定授信终端，请把 client_type 改为 client 并重启 geektrust",
+  409: "browser 模式不能绑定授信终端，请将登录模式设为 client 并重启 geektrust",
 };
 
 export function TrustDevices({ snap, connected }: { snap: Snapshot; connected: boolean }) {
@@ -25,6 +25,9 @@ export function TrustDevices({ snap, connected }: { snap: Snapshot; connected: b
   const [refreshing, setRefreshing] = useState(false);
   // Refresh results must never outlive the session they were fetched in.
   const epochRef = useRef(0);
+  const sessionKey = `${snap.generation ?? 0}:${snap.state}:${snap.since}:${snap.user?.username ?? ""}`;
+  const sessionRef = useRef(sessionKey);
+  if (sessionRef.current !== sessionKey) { sessionRef.current = sessionKey; epochRef.current++; }
 
   const refresh = useCallback(async () => {
     const epoch = ++epochRef.current;
@@ -50,7 +53,9 @@ export function TrustDevices({ snap, connected }: { snap: Snapshot; connected: b
       setError(null);
       setNotice(null);
     }
-  }, [snap.state, refresh]);
+      setPending(null);
+    setRefreshing(false);
+  }, [sessionKey, refresh]);
 
   // Only binding is refused in browser mode (server.go handleTrustBind);
   // listing, unbinding and logout work on any session, so the card stays
@@ -60,18 +65,21 @@ export function TrustDevices({ snap, connected }: { snap: Snapshot; connected: b
   const canAct = connected && snap.state === "online" && !busy;
 
   const run = async (action: () => Promise<void>, ok: string, label: string) => {
+    const session = sessionRef.current;
     setPending(label);
     setError(null);
     setNotice(null);
     try {
       await action();
+      if (session !== sessionRef.current) return;
       setNotice(ok);
       setSelected(new Set());
       await refresh();
     } catch (err) {
+      if (session !== sessionRef.current) return;
       setError(errorText(err, "操作失败", LIST_ERRORS));
     } finally {
-      setPending(null);
+      if (session === sessionRef.current) setPending(null);
     }
   };
 
@@ -100,7 +108,8 @@ export function TrustDevices({ snap, connected }: { snap: Snapshot; connected: b
             className="secondary"
             onClick={() => {
               setRefreshing(true);
-              void refresh().finally(() => setRefreshing(false));
+              const session = sessionRef.current;
+              void refresh().finally(() => { if (session === sessionRef.current) setRefreshing(false); });
             }}
             disabled={!canAct || refreshing}
           >
@@ -129,8 +138,7 @@ export function TrustDevices({ snap, connected }: { snap: Snapshot; connected: b
       )}
       {!isClient && (
         <p className="muted small">
-          当前为 browser 模式：可以查看、取消授信和注销设备，但不能绑定当前设备。把配置中的{" "}
-          <code>client_type</code> 改为 <code>client</code> 并重启 geektrust 后才能绑定。
+          当前为 browser 模式：可以查看、取消授信和注销设备，但不能绑定当前设备。将登录模式设为 <code>client</code> 并重启 geektrust 后才能绑定。
         </p>
       )}
       {error && <ErrorText error={error} />}

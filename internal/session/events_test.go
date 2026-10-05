@@ -178,6 +178,7 @@ func newRestoreFixture(t *testing.T, handler http.HandlerFunc) *Provider {
 	dir := t.TempDir()
 	statePath := filepath.Join(dir, "state.enc")
 	if err := NewStore(statePath).Save(context.Background(), &State{
+		ControllerURL: srv.URL, Username: "u1",
 		SID:        "synthetic-sid",
 		DeviceID:   testDeviceID,
 		CsrfToken:  "synthetic-csrf",
@@ -251,11 +252,12 @@ func TestTryForceReloginReservation(t *testing.T) {
 			t.Fatal("idle provider refused relogin")
 		}
 		waiter := make(chan error, 1)
+		joined := signalJoin(context.Background())
 		go func() {
-			_, err := p.Credential(context.Background())
+			_, err := p.Credential(joined)
 			waiter <- err
 		}()
-		waitForJoiner(t, p)
+		waitForJoiner(t, joined)
 
 		run(context.Background())
 		if err := <-waiter; err == nil {
@@ -420,25 +422,27 @@ func TestDispatcherDropsOldestAndStampsCount(t *testing.T) {
 	}
 }
 
-// waitForJoiner polls until one caller has joined the in-flight refresh,
-// proving the waiter's Credential took the join branch instead of starting
-// its own acquisition or short-circuiting on a cached credential.
-func waitForJoiner(t *testing.T, p *Provider) {
+// The join branch evaluates Done; this test context signals that point without production counters.
+type joinContext struct {
+	context.Context
+	once   sync.Once
+	joined chan struct{}
+}
+
+func signalJoin(ctx context.Context) *joinContext {
+	return &joinContext{Context: ctx, joined: make(chan struct{})}
+}
+func (c *joinContext) Done() <-chan struct{} {
+	c.once.Do(func() { close(c.joined) })
+	return c.Context.Done()
+}
+func waitForJoiner(t *testing.T, c *joinContext) {
 	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		p.mu.Lock()
-		var n int
-		if p.refreshing != nil {
-			n = p.refreshing.waiters
-		}
-		p.mu.Unlock()
-		if n >= 1 {
-			return
-		}
-		time.Sleep(2 * time.Millisecond)
+	select {
+	case <-c.joined:
+	case <-time.After(3 * time.Second):
+		t.Fatal("caller did not join the production refresh")
 	}
-	t.Fatal("no waiter joined the refresh call")
 }
 
 func TestFinishRefreshPublishesLoginSuccess(t *testing.T) {
@@ -462,14 +466,15 @@ func TestFinishRefreshPublishesLoginSuccess(t *testing.T) {
 
 	// A waiter joins the reserved slot and must receive the published result.
 	waiter := make(chan error, 1)
+	joined := signalJoin(context.Background())
 	go func() {
-		got, err := p.Credential(context.Background())
+		got, err := p.Credential(joined)
 		if err == nil && got != cred {
 			t.Errorf("waiter got %p, want %p", got, cred)
 		}
 		waiter <- err
 	}()
-	waitForJoiner(t, p)
+	waitForJoiner(t, joined)
 
 	p.finishRefresh(call, cred, session, false, nil)
 	if err := <-waiter; err != nil {

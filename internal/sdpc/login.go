@@ -3,6 +3,7 @@ package sdpc
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -61,8 +62,20 @@ func (c *Client) CasTicket(ctx context.Context) (string, error) {
 	}
 	resp, err := noFollow.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("cas chain request failed")
+		cause := ctx.Err()
+		if cause == nil {
+			if errors.Is(err, context.Canceled) {
+				cause = context.Canceled
+			} else if errors.Is(err, context.DeadlineExceeded) {
+				cause = context.DeadlineExceeded
+			}
+		}
+		if cause != nil {
+			return "", fmt.Errorf("cas chain request failed: %w", cause)
+		}
+		return "", errors.New("cas chain request failed")
 	}
+
 	resp.Body.Close()
 
 	if shortcutURL == nil {

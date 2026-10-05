@@ -44,6 +44,7 @@ type proxyInfo struct {
 
 // snapshot is the /api/status and SSE payload (§6.3).
 type snapshot struct {
+	Generation    uint64         `json:"generation"`
 	State         string         `json:"state"`
 	Since         time.Time      `json:"since"`
 	LastError     *string        `json:"last_error"`
@@ -72,6 +73,7 @@ type Hub struct {
 	sessionActive bool
 	smsPending    bool
 	smsGen        uint64
+	generation    uint64
 
 	user      *userInfo
 	gateways  []string
@@ -116,6 +118,9 @@ func (h *Hub) OnSessionEvent(ev session.Event) {
 		h.acquiring = true
 		h.lastError = nil
 	case session.EventLoginSuccess, session.EventRestoreOK:
+		if ev.Session != nil {
+			h.generation = ev.Session.Generation
+		}
 		h.acquiring = false
 		h.sessionActive = true
 		h.lastError = nil
@@ -128,7 +133,7 @@ func (h *Hub) OnSessionEvent(ev session.Event) {
 			h.gateways = append([]string(nil), ev.Session.Gateways...)
 			h.dns = append([]string(nil), ev.Session.DNS...)
 		}
-	case session.EventLoginFailed:
+	case session.EventLoginFailed, session.EventInteractionRequired:
 		h.acquiring = false
 		h.sessionActive = false
 		h.clearSessionLocked()
@@ -212,6 +217,7 @@ func (h *Hub) snapshotLocked() snapshot {
 	events := make([]HistoryEvent, len(h.events))
 	copy(events, h.events)
 	return snapshot{
+		Generation:    h.generation,
 		State:         h.state,
 		Since:         h.since,
 		LastError:     h.lastError,

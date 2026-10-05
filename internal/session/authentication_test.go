@@ -19,7 +19,7 @@ func TestMissingChallengeHandlerReturnsTypedError(t *testing.T) {
 	p := &Provider{}
 	_, err := p.smsFlow(context.Background(), nil)
 	var required *auth.RequiredError
-	if !errors.Is(err, auth.ErrRequired) || !errors.As(err, &required) || required.Challenge.Method != "auth/sms" {
+	if !errors.Is(err, auth.ErrInteractionRequired) || !errors.As(err, &required) || required.Challenge.Info.Method != auth.SMS {
 		t.Fatalf("unexpected challenge error: %v", err)
 	}
 }
@@ -37,7 +37,7 @@ func TestCancelledChallengeDoesNotSubmitAnswer(t *testing.T) {
 	defer cancel()
 	p := &Provider{logger: slog.New(slog.NewTextHandler(io.Discard, nil)), ChallengeHandler: func(ctx context.Context, challenge auth.Challenge) (string, error) {
 		deadline, ok := ctx.Deadline()
-		if !ok || !deadline.Equal(challenge.ExpiresAt) || time.Until(deadline) > time.Minute {
+		if !ok || !deadline.Equal(challenge.Info.Deadline) || time.Until(deadline) > time.Minute {
 			t.Fatal("challenge missing bounded lifetime")
 		}
 		cancel()

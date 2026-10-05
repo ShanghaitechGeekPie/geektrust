@@ -50,11 +50,14 @@ type Server struct {
 	http     *http.Server
 	dist     fs.FS
 	hasUI    bool
+	lifetime context.Context
+	cancel   context.CancelFunc
 }
 
 // NewServer wires the routes, security middleware and embedded frontend.
 func NewServer(hub *Hub, broker *Broker, provider ProviderAPI, cfg *config.Config) *Server {
-	s := &Server{hub: hub, broker: broker, provider: provider, cfg: cfg}
+	ctx, cancel := context.WithCancel(context.Background())
+	s := &Server{hub: hub, broker: broker, provider: provider, cfg: cfg, lifetime: ctx, cancel: cancel}
 	if sub, err := fs.Sub(distFS, "dist"); err == nil {
 		s.dist = sub
 		if f, err := sub.Open("index.html"); err == nil {
@@ -97,6 +100,7 @@ func (s *Server) Serve(listener net.Listener) error {
 // a client that stopped reading mid-response) are hard-closed instead of
 // leaked past the deadline.
 func (s *Server) Shutdown(ctx context.Context) error {
+	s.cancel()
 	err := s.http.Shutdown(ctx)
 	if err != nil {
 		s.http.Close()
@@ -250,7 +254,7 @@ func (s *Server) handleRelogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// The reserved acquisition must run exactly once and outlive the request.
-	go run(context.Background())
+	go run(s.lifetime)
 	writeJSON(w, http.StatusAccepted, map[string]any{})
 }
 
@@ -277,7 +281,7 @@ func (s *Server) handleTrustList(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleTrustBind(w http.ResponseWriter, r *http.Request) {
 	if s.cfg.ClientType != "client" {
-		writeError(w, http.StatusConflict, `trust-device bind requires client_type = "client" in config`)
+		writeError(w, http.StatusConflict, `trust-device bind requires client authentication mode`)
 		return
 	}
 	sc := s.activeSC(w)
@@ -376,3 +380,5 @@ func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
 	}
 	http.FileServerFS(s.dist).ServeHTTP(w, r)
 }
+
+func (s *Server) SetLifetime(ctx context.Context) { context.AfterFunc(ctx, s.cancel) }

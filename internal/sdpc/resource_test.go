@@ -313,3 +313,31 @@ func TestAPIErrorSessionExpired(t *testing.T) {
 		}
 	}
 }
+
+func TestExplicitGenericLeavesDomainAddressUninferred(t *testing.T) {
+	var envelope struct {
+		Data json.RawMessage `json:"data"`
+	}
+	if e := json.Unmarshal([]byte(sampleResource), &envelope); e != nil {
+		t.Fatal(e)
+	}
+	var raw clientResource
+	if e := json.Unmarshal(envelope.Data, &raw); e != nil {
+		t.Fatal(e)
+	}
+	c := NewClient("https://vpn.shanghaitech.edu.cn", "Mac", "id", nil)
+	disabled := false
+	c.DomainMapping = &disabled
+	v := c.parseResource(&raw)
+	rule, ok := v.MatchDomainProtocol("library.shanghaitech.edu.cn", 443, "tcp")
+	if !ok || rule.IP != "" {
+		t.Fatal("generic deployment inherited a school IP mapping")
+	}
+	enabled := true
+	c.DomainMapping = &enabled
+	v = c.parseResource(&raw)
+	rule, ok = v.MatchDomainProtocol("library.shanghaitech.edu.cn", 443, "tcp")
+	if !ok || rule.IP != "10.15.45.163" {
+		t.Fatal("verified school mapping lost")
+	}
+}

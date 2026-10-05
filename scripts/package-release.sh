@@ -32,14 +32,7 @@ trap 'rm -rf "$package_tmp"' EXIT
 npm --prefix web ci
 npm --prefix web run build
 
-targets=(
-  linux/amd64
-  linux/arm64
-  darwin/amd64
-  darwin/arm64
-  windows/amd64
-  windows/arm64
-)
+source "$repo_root/scripts/release-targets.sh"
 
 for target in "${targets[@]}"; do
   goos=${target%/*}

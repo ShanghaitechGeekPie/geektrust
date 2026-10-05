@@ -45,6 +45,9 @@ func TestECNUCredentialPersistence(t *testing.T) {
 // TestECNULiveLogin is opt-in and never logs credentials or server payloads.
 // The credential counter is durably updated; do not run another signer concurrently.
 func TestECNULiveLogin(t *testing.T) {
+	if os.Getenv("GEEKTRUST_LIVE_TESTS") != "1" {
+		t.Skip("online tests require explicit GEEKTRUST_LIVE_TESTS=1")
+	}
 	path := os.Getenv("GEEKTRUST_ECNU_KEYSTORE")
 	if path == "" {
 		t.Skip("explicit live credential required")

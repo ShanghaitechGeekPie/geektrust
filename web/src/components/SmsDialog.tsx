@@ -42,12 +42,15 @@ export function SmsDialog({ snap }: { snap: Snapshot }) {
     setBusy(true);
     setError(null);
     setNotice(null);
+    const requestedGen = gen;
     try {
-      await post("/api/sms", { code, gen: snap.sms_gen });
+      await post("/api/sms", { code, gen: requestedGen });
+      if (currentGen.current !== requestedGen) return;
       // 202 = 已投递;登录结果经 SSE 推送。验证失败会结束本次登录,
       // 弹窗随之关闭,状态卡片会显示失败原因。
       setNotice("已提交，等待服务端验证…");
     } catch (err) {
+      if (currentGen.current !== requestedGen) return;
       setBusy(false);
       setError(
         errorText(err, "提交失败", {
@@ -62,13 +65,14 @@ export function SmsDialog({ snap }: { snap: Snapshot }) {
     if (busy || cooldown > 0) return;
     setError(null);
     setNotice(null);
+    const requestedGen = gen;
     try {
-      const requestedGen = snap.sms_gen;
       const result = await postJSON<{ restarting?: boolean }>("/api/sms/resend", { gen: requestedGen });
       if (currentGen.current !== requestedGen) return;
       setNotice(result.restarting ? "验证已过期，正在重新登录并发送新验证码…" : "验证码已重新发送");
       setCooldown(RESEND_COOLDOWN);
     } catch (err) {
+      if (currentGen.current !== requestedGen) return;
       if (err instanceof ApiError && err.status === 429) {
         // 上一条验证码仍在有效期内:直接输入它,同时进入冷却防止连点。
         setCooldown(RESEND_COOLDOWN);

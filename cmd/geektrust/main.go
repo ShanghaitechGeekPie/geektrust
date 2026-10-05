@@ -17,15 +17,14 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/ShanghaitechGeekPie/geektrust/internal/config"
 	"github.com/ShanghaitechGeekPie/geektrust/internal/inbound"
-	"github.com/ShanghaitechGeekPie/geektrust/internal/l3"
-	"github.com/ShanghaitechGeekPie/geektrust/internal/resolver"
+	"github.com/ShanghaitechGeekPie/geektrust/internal/runtime"
 	"github.com/ShanghaitechGeekPie/geektrust/internal/session"
-	"github.com/ShanghaitechGeekPie/geektrust/internal/tunnel"
 	"github.com/ShanghaitechGeekPie/geektrust/internal/webui"
 )
 
@@ -73,6 +72,13 @@ func main() {
 		return
 	}
 
+	if cmd == "config" {
+		if e := cmdConfig(configPath, args); e != nil {
+			fmt.Fprintln(os.Stderr, e)
+			os.Exit(1)
+		}
+		return
+	}
 	cfg, err := config.Load(configPath)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "geektrust:", err)
@@ -141,6 +147,11 @@ func cmdLogin(ctx context.Context, cfg *config.Config, logger *slog.Logger, args
 	if err != nil {
 		return err
 	}
+	if cfg.ClientType == "client" {
+		if e := c.TrustCurrentDevice(ctx); e != nil {
+			logger.Warn("trust device binding failed", "err", e)
+		}
+	}
 	fmt.Printf("gateways: %s\ndns: %s\nauthorized resources: %d\n", strings.Join(info.Gateways, ", "), strings.Join(info.DNS, ", "), len(info.Resources))
 	return nil
 }
@@ -150,41 +161,43 @@ func cmdLogin(ctx context.Context, cfg *config.Config, logger *slog.Logger, args
 // first login so SMS verification can be completed in the browser; any panel
 // failure degrades to the terminal-only path without affecting the VPN.
 func cmdRun(ctx context.Context, cfg *config.Config, logger *slog.Logger, args []string) error {
-	if !cfg.WebEnabled() {
-		return runVPN(ctx, cfg, logger, session.NewProvider(cfg, logger, smsPrompt))
+	if len(args) != 0 {
+		return errors.New("usage: geektrust run")
 	}
-	if webListenConflict(cfg) {
-		logger.Warn("web panel listen conflicts with an enabled inbound listener; panel disabled",
-			"listen", cfg.Web.Listen)
-		return runVPN(ctx, cfg, logger, session.NewProvider(cfg, logger, smsPrompt))
+	if !cfg.Inbound.SOCKS5.Enabled && !cfg.Inbound.HTTP.Enabled {
+		return errors.New("no proxy listeners enabled")
 	}
-	listener, err := net.Listen("tcp", cfg.Web.Listen)
-	if err != nil {
-		logger.Warn("web panel listen failed; panel disabled", "err", err)
-		return runVPN(ctx, cfg, logger, session.NewProvider(cfg, logger, smsPrompt))
+	c, e := commandClient(cfg, logger)
+	if e != nil {
+		return e
 	}
-
-	hub := webui.NewHub(cfg)
-	broker := webui.NewBroker(hub.SetSMSPending)
-	provider := session.NewProvider(cfg, logger, nil)
-	provider.SetSMSHandler(broker)
-	provider.AddObserver(hub)
-	server := webui.NewServer(hub, broker, provider, cfg)
-	go func() {
-		// A panel failure must never affect the VPN; surface it in the log
-		// instead of dying silently.
-		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			logger.Warn("web panel server stopped unexpectedly", "err", err)
+	defer c.Close()
+	if cfg.WebEnabled() && !webListenConflict(cfg) {
+		ln, e := net.Listen("tcp", cfg.Web.Listen)
+		if e != nil {
+			logger.Warn("web panel disabled", "err", e)
+		} else {
+			hub := webui.NewHub(cfg)
+			broker := webui.NewBroker(hub.SetSMSPending)
+			c.Provider().SetSMSHandler(broker)
+			c.Provider().ChallengeHandler = nil
+			c.Provider().AddObserver(hub)
+			server := webui.NewServer(hub, broker, c, cfg)
+			server.SetLifetime(ctx)
+			go func() {
+				if e := server.Serve(ln); e != nil && !errors.Is(e, http.ErrServerClosed) {
+					logger.Warn("web panel stopped", "err", e)
+				}
+			}()
+			defer func() {
+				stop, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				_ = server.Shutdown(stop)
+			}()
+			logger.Info("web panel", "url", "http://"+cfg.Web.Listen)
 		}
-	}()
-	defer func() {
-		// The run context may already be canceled here; use a fresh one.
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = server.Shutdown(shutdownCtx)
-	}()
-	logger.Info("web panel", "url", "http://"+cfg.Web.Listen)
-	return runVPN(ctx, cfg, logger, provider)
+	}
+	return runVPN(ctx, cfg, logger, c)
 }
 
 // webListenConflict reports whether the panel address collides with an
@@ -250,24 +263,21 @@ func listenIP(host string) net.IP {
 }
 
 // runVPN establishes the session and serves the proxy listeners.
-func runVPN(ctx context.Context, cfg *config.Config, logger *slog.Logger, provider *session.Provider) error {
-	cred, err := provider.Credential(ctx)
-	if err != nil {
-		return err
+func runVPN(ctx context.Context, cfg *config.Config, logger *slog.Logger, c *runtime.Runtime) error {
+	if _, e := c.Connect(ctx); e != nil {
+		return e
+	}
+	cred, e := c.Provider().Credential(ctx)
+	if e != nil {
+		return e
 	}
 	printSummary(cred)
-
-	// Session liveness: periodic onlineInfo, silent re-login on expiry.
-	go provider.CheckLoop(ctx, 5*time.Minute)
-
-	manager := tunnel.NewManager(provider, logger)
-	manager.GatewayTLSConfig = &tls.Config{ServerName: cfg.GatewayServerName()}
-	defer manager.Close()
-	dialer := &l3.Dialer{Manager: manager, Provider: provider, Logger: logger}
-	res := resolver.New(provider, dialer)
-
-	srv := inbound.New(cfg.Inbound, res, dialer, logger)
-	return srv.Run(ctx)
+	if cfg.ClientType == "client" {
+		if e := c.TrustCurrentDevice(ctx); e != nil {
+			logger.Warn("trust device binding failed", "err", e)
+		}
+	}
+	return inbound.New(cfg.Inbound, c, c, logger).Run(ctx)
 }
 
 func printSummary(cred *session.Credential) {
@@ -292,33 +302,34 @@ func printSummary(cred *session.Credential) {
 }
 
 // smsPrompt reads the SMS code from stdin whenever the controller demands it.
+var terminalInput struct {
+	once  sync.Once
+	lines chan string
+}
+
 func smsPrompt(ctx context.Context) (string, error) {
-	fmt.Fprintln(os.Stderr, "The controller requires SMS verification; a code was sent to your phone.")
-	fmt.Fprint(os.Stderr, "Enter the 6-digit code: ")
-	type result struct {
-		code string
-		err  error
-	}
-	ch := make(chan result, 1)
-	go func() {
-		sc := bufio.NewScanner(os.Stdin)
-		if sc.Scan() {
-			ch <- result{code: strings.TrimSpace(sc.Text())}
-		} else {
-			ch <- result{err: errors.New("no verification code provided")}
-		}
-	}()
+	terminalInput.once.Do(func() {
+		terminalInput.lines = make(chan string)
+		go func() {
+			defer close(terminalInput.lines)
+			scan := bufio.NewScanner(os.Stdin)
+			for scan.Scan() {
+				select {
+				case terminalInput.lines <- strings.TrimSpace(scan.Text()):
+				default:
+				}
+			}
+		}()
+	})
+	fmt.Fprintln(os.Stderr, "The controller requires SMS verification; enter the 6-digit code:")
 	select {
-	case r := <-ch:
-		if r.err != nil {
-			return "", r.err
-		}
-		if r.code == "" {
-			return "", errors.New("empty verification code")
-		}
-		return r.code, nil
 	case <-ctx.Done():
 		return "", ctx.Err()
+	case code, ok := <-terminalInput.lines:
+		if !ok || code == "" {
+			return "", errors.New("no verification code provided")
+		}
+		return code, nil
 	}
 }
 
@@ -352,7 +363,7 @@ func cmdDial(ctx context.Context, cfg *config.Config, logger *slog.Logger, args 
 		time.Since(start).Round(time.Millisecond))
 
 	if port == 443 {
-		tlsConn := tls.Client(conn, &tls.Config{InsecureSkipVerify: true, ServerName: host})
+		tlsConn := tls.Client(conn, &tls.Config{ServerName: host})
 		if err := tlsConn.HandshakeContext(ctx); err != nil {
 			return fmt.Errorf("tls handshake over tunnel: %w", err)
 		}
@@ -416,11 +427,15 @@ func cmdTrustDevice(ctx context.Context, cfg *config.Config, logger *slog.Logger
 		return err
 	}
 
-	provider := session.NewProvider(cfg, logger, smsPrompt)
-	if _, err := provider.Credential(ctx); err != nil {
+	c, err := commandClient(cfg, logger)
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+	if _, err := c.Connect(ctx); err != nil {
 		return fmt.Errorf("trust-device: need an active session: %w", err)
 	}
-	sc := provider.SDPCClient()
+	sc := c.ActiveSDPC()
 	if sc == nil {
 		return fmt.Errorf("trust-device: no controller client available")
 	}

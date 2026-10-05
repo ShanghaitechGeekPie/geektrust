@@ -8,9 +8,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
-
-	"golang.org/x/text/unicode/norm"
 
 	"github.com/ShanghaitechGeekPie/geektrust/internal/config"
 	"github.com/ShanghaitechGeekPie/geektrust/internal/privatefile"
@@ -37,9 +36,7 @@ func validateInitPaths(configPath string, cfg *config.Config) (string, error) {
 		if item.path == "" {
 			return "", fmt.Errorf("%s path is required", item.name)
 		}
-		if containsParentTraversal(item.path) {
-			return "", fmt.Errorf("%s path must not contain '..'", item.name)
-		}
+
 		var err error
 		lexical[i], err = filepath.Abs(filepath.Clean(item.path))
 		if err != nil {
@@ -65,61 +62,22 @@ func validateInitPaths(configPath string, cfg *config.Config) (string, error) {
 			}
 		}
 	}
-	for i, item := range paths {
-		if infos[i] != nil {
-			if err := validateInitFilePermissions(item.name, lexical[i]); err != nil {
-				return "", err
-			}
-			if err := validateInitFilePermissions(item.name, resolved[i]); err != nil {
-				return "", err
-			}
-		}
-		if err := validateInitDirectory(item.name, lexical[i]); err != nil {
-			return "", err
-		}
-		if err := validateInitDirectory(item.name, resolved[i]); err != nil {
-			return "", err
-		}
-	}
 	return resolved[0], nil
 }
 
-func initPathsOverlap(left, right string) bool {
-	// NFC + EqualFold is deliberately conservative: generated file paths
-	// must also be distinct on case-insensitive APFS, which treats canonically
-	// equivalent Unicode filenames as the same entry.
-	leftParts := strings.Split(filepath.ToSlash(norm.NFC.String(filepath.Clean(left))), "/")
-	rightParts := strings.Split(filepath.ToSlash(norm.NFC.String(filepath.Clean(right))), "/")
-	if len(leftParts) > len(rightParts) {
-		leftParts, rightParts = rightParts, leftParts
+func initPathsOverlap(a, b string) bool {
+	a = filepath.Clean(a)
+	b = filepath.Clean(b)
+	if runtime.GOOS == "windows" {
+		a = strings.ToLower(a)
+		b = strings.ToLower(b)
 	}
-	for i := range leftParts {
-		if !strings.EqualFold(leftParts[i], rightParts[i]) {
-			return false
-		}
-	}
-	return true
-}
-
-func containsParentTraversal(path string) bool {
-	for _, component := range strings.Split(filepath.ToSlash(path), "/") {
-		if component == ".." {
-			return true
-		}
-	}
-	return false
+	return a == b || strings.HasPrefix(a, b+string(filepath.Separator)) || strings.HasPrefix(b, a+string(filepath.Separator))
 }
 
 func validateInitDirectory(name, path string) error {
-	if err := privatefile.CheckParents(path); err != nil {
-		return fmt.Errorf("%s %w", name, err)
-	}
-	return nil
-}
-
-func validateInitFilePermissions(name, path string) error {
-	if err := privatefile.CheckFile(path); err != nil {
-		return fmt.Errorf("%s file %s: %w", name, path, err)
+	if info, err := os.Stat(filepath.Dir(path)); err == nil && !info.IsDir() {
+		return fmt.Errorf("%s parent is not a directory", name)
 	}
 	return nil
 }
@@ -241,7 +199,7 @@ func cmdInit(ctx context.Context, configPath string, args []string) error {
 	fs.SetOutput(os.Stderr)
 	keystore := fs.String("keystore", "./ids-passkey.keystore", "passkey keystore path")
 	deviceID := fs.String("device-id", "", "persistent 32-character uppercase hex device ID (generated when omitted)")
-	stateFile := fs.String("state-file", "./state.enc", "encrypted session state path")
+	stateFile := fs.String("state-file", "", "encrypted session state path")
 	clientType := fs.String("client-type", "client", "login mode: client (recommended) or browser")
 	bindPasskey := fs.Bool("bind-passkey", false, "run shanghaitech-ids-passkey bind when the keystore is missing")
 	force := fs.Bool("force", false, "replace an existing config file")
@@ -283,9 +241,6 @@ func cmdInit(ctx context.Context, configPath string, args []string) error {
 	if info, err := os.Stat(prepared.Keystore); err == nil {
 		if !info.Mode().IsRegular() {
 			return fmt.Errorf("keystore %s is not a regular file", prepared.Keystore)
-		}
-		if err := privatefile.Protect(prepared.Keystore); err != nil {
-			return fmt.Errorf("secure existing keystore: %w", err)
 		}
 		keystoreExists = true
 	} else if !errors.Is(err, os.ErrNotExist) {

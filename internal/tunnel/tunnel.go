@@ -157,13 +157,18 @@ func gatewayTLSConfigWithTrust(ctx context.Context, addr string, template *tls.C
 		for _, cert := range cs.PeerCertificates[1:] {
 			intermediates.AddCert(cert)
 		}
-		if _, err := cs.PeerCertificates[0].Verify(x509.VerifyOptions{DNSName: cfg.ServerName, Roots: cfg.RootCAs, Intermediates: intermediates}); err == nil {
+		_, verifyErr := cs.PeerCertificates[0].Verify(x509.VerifyOptions{DNSName: cfg.ServerName, Roots: cfg.RootCAs, Intermediates: intermediates})
+		if verifyErr == nil {
 			return nil
+		}
+		var unknown x509.UnknownAuthorityError
+		if !errors.As(verifyErr, &unknown) {
+			return verifyErr
 		}
 		leaf := cs.PeerCertificates[0]
 		// Controllers may advertise gateway IPs whose private-CA certificates
 		// contain DNS names only. The saved key is bound to the advertised IP:port.
-		if net.ParseIP(cfg.ServerName) == nil {
+		if cfg.ServerName != "" {
 			if err := leaf.VerifyHostname(cfg.ServerName); err != nil {
 				return fmt.Errorf("gateway certificate identity: %w", err)
 			}

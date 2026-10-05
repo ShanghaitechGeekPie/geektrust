@@ -10,9 +10,8 @@ import (
 	"io"
 	"net/url"
 	"os"
-	"path/filepath"
 
-	"github.com/ShanghaitechGeekPie/geektrust/internal/privatefile"
+	"github.com/ShanghaitechGeekPie/geektrust/internal/storage"
 )
 
 // keystoreMagic prefixes every default-format keystore file
@@ -244,31 +243,5 @@ func marshalNoEscape(v any) ([]byte, error) {
 // writeFileAtomic writes data to a temp file in the same directory and renames
 // it over path, so a crash never leaves a half-written secret file.
 func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
-	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, ".keystore-*.tmp")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
-	if err := privatefile.Protect(tmpName); err != nil {
-		tmp.Close()
-		return err
-	}
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Chmod(perm); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmpName, path)
+	return storage.WriteAtomic(path, data, perm)
 }

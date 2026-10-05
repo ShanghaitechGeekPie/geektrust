@@ -78,10 +78,11 @@ func IsSessionExpired(err error) bool {
 // Client talks to the SDPC controller. The HTTP client must carry a cookie
 // jar; the session cookies (sid & friends) live there.
 type Client struct {
-	BaseURL  string
-	Platform string
-	DeviceID string
-	HTTP     *http.Client
+	DomainMapping *bool
+	BaseURL       string
+	Platform      string
+	DeviceID      string
+	HTTP          *http.Client
 
 	// ClientType selects the login path for reportEnv: ClientTypeBrowser
 	// (default) keeps the session in pure-web mode; ClientTypeDesktop marks

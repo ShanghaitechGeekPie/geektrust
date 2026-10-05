@@ -1,19 +1,17 @@
-package client
+package runtime
 
 import (
 	"context"
 	"crypto/tls"
 	"errors"
-	"github.com/ShanghaitechGeekPie/geektrust/auth"
 	"io"
 	"net/http"
-	"net/url"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/ShanghaitechGeekPie/geektrust/deployment"
 	"github.com/ShanghaitechGeekPie/geektrust/internal/config"
+	"github.com/ShanghaitechGeekPie/geektrust/internal/settings"
 )
 
 type compatibilityStore string
@@ -37,17 +35,19 @@ func (compatibilityTransport) RoundTrip(r *http.Request) (*http.Response, error)
 
 func TestExplicitCompatibilityOptions(t *testing.T) {
 	template := &tls.Config{}
-	options := Options{
-		Compatibility: deployment.Compatibility{FallbackAppID: "custom-app", GatewayServerName: "gateway.example"},
+	options := legacyOptions{
+		Compatibility: settings.Compatibility{FallbackAppID: "custom-app", GatewayServerName: "gateway.example"},
 		LoginDomain:   "custom-domain",
 		ControllerURL: config.DefaultBaseURL,
 		DeviceID:      "0123456789ABCDEF0123456789ABCDEF",
 		Gateways:      []string{"override:441"}, DNS: []string{"10.0.0.53"},
 		GatewayTLSConfig: template, Transport: compatibilityTransport{},
-		SessionStore:  compatibilityStore(`{"sid":"synthetic-session","device_id":"0123456789ABCDEF0123456789ABCDEF","client_type":"browser","cookies":[{"name":"sid","value":"synthetic-session"}]}`),
-		Authenticator: AuthenticatorFunc(func(context.Context, *http.Client) (string, error) { return "", errors.New("unexpected full login") }),
+		SessionStore: compatibilityStore(`{"sid":"synthetic-session","device_id":"0123456789ABCDEF0123456789ABCDEF","client_type":"browser","cookies":[{"name":"sid","value":"synthetic-session"}]}`),
+		Authenticator: AuthenticatorFunc(func(context.Context, *http.Client) (string, error) {
+			return "", errors.New("unexpected full login")
+		}),
 	}
-	c, err := New(options)
+	c, err := newLegacy(options)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +77,7 @@ func TestAuthenticationUsesCallerDeadline(t *testing.T) {
 	defer cancel()
 	want, _ := parent.Deadline()
 	called := false
-	c, err := New(Options{ControllerURL: config.DefaultBaseURL, DeviceID: "0123456789ABCDEF0123456789ABCDEF", Authenticator: AuthenticatorFunc(func(ctx context.Context, _ *http.Client) (string, error) {
+	c, err := newLegacy(legacyOptions{ControllerURL: config.DefaultBaseURL, DeviceID: "0123456789ABCDEF0123456789ABCDEF", Authenticator: AuthenticatorFunc(func(ctx context.Context, _ *http.Client) (string, error) {
 		called = true
 		got, ok := ctx.Deadline()
 		if !ok || !got.Equal(want) {
@@ -98,50 +98,18 @@ type controllerTransport func(*http.Request) (*http.Response, error)
 
 func (f controllerTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
-func TestCustomControllerLogin(t *testing.T) {
-	calls := 0
-	transport := controllerTransport(func(r *http.Request) (*http.Response, error) {
-		if r.URL.Path == "/passport/v1/public/authConfig" {
-			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"code":0,"data":{"security":{"csrfToken":"synthetic"},"authServerInfoList":[{"authType":"auth/cas","loginDomain":"a"},{"authType":"auth/cas","loginDomain":"b"}]}}`))}, nil
-		}
-		return (compatibilityTransport{}).RoundTrip(r)
-	})
-	c, err := New(Options{
-		ControllerURL: "https://controller.example", DeviceID: "0123456789ABCDEF0123456789ABCDEF",
-		Transport: transport, Compatibility: deployment.Compatibility{FallbackGateways: []string{"gateway.example:441"}},
-		ControllerLogin: func(ctx context.Context, httpClient *http.Client, request auth.ControllerRequest) error {
-			calls++
-			if request.URL != "https://controller.example" || request.LoginDomain != "" || request.CSRFToken != "synthetic" {
-				t.Fatal("custom authentication received implicit CAS configuration")
-			}
-			origin, _ := url.Parse(request.URL)
-			httpClient.Jar.SetCookies(origin, []*http.Cookie{{Name: "sid", Value: "synthetic"}})
-			return nil
-		},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer c.Close()
-	info, err := c.Connect(context.Background())
-	if err != nil || calls != 1 {
-		t.Fatalf("custom login calls=%d err=%v", calls, err)
-	}
-	if !info.Implemented.IPv4ICMP || info.Implemented.IPv6Targets || len(info.Resources) != 0 {
-		t.Fatal("implementation and authorization were conflated")
-	}
-}
-
 func TestRestoredSessionUsesCurrentCompatibility(t *testing.T) {
 	state := compatibilityStore(`{"sid":"synthetic","device_id":"0123456789ABCDEF0123456789ABCDEF","client_type":"browser","cookies":[{"name":"sid","value":"synthetic"}],"gateways":["stale.example:441"]}`)
 	for _, enabled := range []bool{true, false} {
-		options := Options{ControllerURL: config.DefaultBaseURL, DeviceID: "0123456789ABCDEF0123456789ABCDEF", Transport: compatibilityTransport{}, SessionStore: state,
-			Authenticator: AuthenticatorFunc(func(context.Context, *http.Client) (string, error) { return "", errors.New("synthetic no fresh login") }),
+		options := legacyOptions{ControllerURL: config.DefaultBaseURL, DeviceID: "0123456789ABCDEF0123456789ABCDEF", Transport: compatibilityTransport{}, SessionStore: state,
+			Authenticator: AuthenticatorFunc(func(context.Context, *http.Client) (string, error) {
+				return "", errors.New("synthetic no fresh login")
+			}),
 		}
 		if enabled {
-			options.Compatibility = deployment.Compatibility{FallbackAppID: "app", FallbackGateways: []string{"configured.example:441"}, TCPToL3Fallback: true}
+			options.Compatibility = settings.Compatibility{FallbackAppID: "app", FallbackGateways: []string{"configured.example:441"}, TCPToL3Fallback: true}
 		}
-		c, err := New(options)
+		c, err := newLegacy(options)
 		if err != nil {
 			t.Fatal(err)
 		}

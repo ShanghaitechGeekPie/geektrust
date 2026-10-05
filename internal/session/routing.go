@@ -3,6 +3,9 @@ package session
 // GatewaysForGroup restricts configured gateways to the assigned group. Missing
 // groups may use the flattened list only when compatibility explicitly allows it.
 func (c *Credential) GatewaysForGroup(group string) []string {
+	if c.LegacyGatewayOverride {
+		return append([]string(nil), c.Gateways...)
+	}
 	var assigned []string
 	if c.Policy != nil {
 		if group == "" {
@@ -16,7 +19,9 @@ func (c *Credential) GatewaysForGroup(group string) []string {
 			assigned = c.Policy.Gateways
 		}
 		if len(assigned) == 0 {
-			assigned = c.Gateways
+			if !c.GatewayOverride {
+				assigned = c.Gateways
+			}
 		}
 	}
 	if c.GatewayOverride {

@@ -17,7 +17,8 @@ export interface PanelStore {
 let store: PanelStore = { snap: null, connected: false };
 const listeners = new Set<() => void>();
 let sawStream = false;
-let reconnectTimer: number | undefined;
+let stream: EventSource | undefined;
+let streamEpoch = 0;
 
 function publish(next: PanelStore) {
   store = next;
@@ -25,8 +26,8 @@ function publish(next: PanelStore) {
 }
 
 function connect() {
-  reconnectTimer = undefined;
   const es = new EventSource("/api/events");
+  stream = es;
   es.onopen = () => {
     if (!store.connected) publish({ ...store, connected: true });
   };
@@ -41,38 +42,44 @@ function connect() {
     publish({ snap, connected: true });
   };
   es.onerror = () => {
-    // Rebuild the stream ourselves: EventSource stops retrying once closed,
-    // and the UI needs an explicit "disconnected" signal either way.
-    es.close();
+    // EventSource retries the connection itself.
     if (store.connected) publish({ ...store, connected: false });
-    if (reconnectTimer === undefined) {
-      reconnectTimer = window.setTimeout(connect, 2000);
-    }
   };
 }
 
-async function seed() {
+async function seed(epoch: number) {
   try {
     const resp = await fetch("/api/status");
     if (!resp.ok) return;
     const snap = (await resp.json()) as Snapshot;
-    if (!sawStream) publish({ ...store, snap });
+    if (epoch === streamEpoch && !sawStream) publish({ ...store, snap });
   } catch {
     // the SSE loop owns retries
   }
 }
 
-connect();
-void seed();
+
+
+function subscribePanel(cb: () => void) {
+  listeners.add(cb);
+  if (listeners.size === 1) {
+    sawStream = false;
+    connect();
+    void seed(++streamEpoch);
+  }
+  return () => {
+    listeners.delete(cb);
+    if (listeners.size === 0) {
+      streamEpoch++;
+      stream?.close();
+      stream = undefined;
+      store = { ...store, connected: false };
+    }
+  };
+}
 
 export function usePanelStore(): PanelStore {
-  return useSyncExternalStore(
-    (cb) => {
-      listeners.add(cb);
-      return () => listeners.delete(cb);
-    },
-    () => store,
-  );
+  return useSyncExternalStore(subscribePanel, () => store);
 }
 
 // ---------------------------------------------------------------------------

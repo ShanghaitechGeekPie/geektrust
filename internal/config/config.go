@@ -3,6 +3,8 @@ package config
 
 import (
 	"fmt"
+	public "github.com/ShanghaitechGeekPie/geektrust/deployment"
+	defaults "github.com/ShanghaitechGeekPie/geektrust/internal/deployment"
 	"net"
 	"os"
 	"strconv"
@@ -11,7 +13,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 
-	"github.com/ShanghaitechGeekPie/geektrust/deployment"
+	"github.com/ShanghaitechGeekPie/geektrust/internal/settings"
 )
 
 // DefaultDeviceID is the legacy shared browser-mode identifier. It remains
@@ -27,19 +29,29 @@ const DefaultWebListen = "127.0.0.1:8081"
 
 // Config is the top-level configuration.
 type Config struct {
-	Compatibility deployment.Compatibility `toml:"compatibility"`
-	Keystore      string                   `toml:"keystore"`
-	DeviceID      string                   `toml:"device_id"`
-	BaseURL       string                   `toml:"base_url"`
-	Platform      string                   `toml:"platform"`
-	ClientType    string                   `toml:"client_type"`
-	LoginDomain   string                   `toml:"login_domain"`
-	Gateways      []string                 `toml:"gateways"`
-	DNS           []string                 `toml:"dns"`
-	StateFile     string                   `toml:"state_file"`
-	LogLevel      string                   `toml:"log_level"`
-	Inbound       Inbound                  `toml:"inbound"`
-	Web           WebConfig                `toml:"web"`
+	UnknownFields         []string       `toml:"-"`
+	CompatibilityExplicit bool           `toml:"-"`
+	Version               int            `toml:"-"`
+	Deployment            public.Profile `toml:"-"`
+	DNSStrategy           string         `toml:"-"`
+	Directory             string         `toml:"-"`
+	CAFile                string         `toml:"-"`
+	SourcePath            string         `toml:"-"`
+	AppID                 string         `toml:"app_id"`
+
+	Compatibility settings.Compatibility `toml:"compatibility"`
+	Keystore      string                 `toml:"keystore"`
+	DeviceID      string                 `toml:"device_id"`
+	BaseURL       string                 `toml:"base_url"`
+	Platform      string                 `toml:"platform"`
+	ClientType    string                 `toml:"client_type"`
+	LoginDomain   string                 `toml:"login_domain"`
+	Gateways      []string               `toml:"gateways"`
+	DNS           []string               `toml:"dns"`
+	StateFile     string                 `toml:"state_file"`
+	LogLevel      string                 `toml:"log_level"`
+	Inbound       Inbound                `toml:"inbound"`
+	Web           WebConfig              `toml:"web"`
 }
 
 // Inbound holds the proxy listener configuration.
@@ -74,13 +86,39 @@ func Load(path string) (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read config: %w", err)
 	}
+	var header struct {
+		Version int `toml:"config_version"`
+	}
+	if _, err := toml.Decode(string(data), &header); err != nil {
+		return nil, err
+	}
+	if header.Version != 0 {
+		if header.Version != 2 {
+			return nil, fmt.Errorf("unsupported config_version %d", header.Version)
+		}
+		return loadV2(path, data)
+	}
 	var cfg Config
 	meta, err := toml.Decode(string(data), &cfg)
 	if err != nil {
 		return nil, fmt.Errorf("parse config %s: %w", path, err)
 	}
-	if keys := meta.Undecoded(); len(keys) != 0 {
-		return nil, fmt.Errorf("unknown configuration field %s", keys[0])
+	for _, key := range meta.Undecoded() {
+		cfg.UnknownFields = append(cfg.UnknownFields, key.String())
+	}
+	cfg.CompatibilityExplicit = meta.IsDefined("compatibility")
+	cfg.Version = 1
+	cfg.SourcePath = path
+	cfg.DNSStrategy = "auto"
+	cfg.applyDefaults()
+	if !meta.IsDefined("compatibility") {
+		cfg.Compatibility = defaults.Resolve(cfg.BaseURL, public.Options{}).Compatibility
+	}
+	if cfg.AppID != "" {
+		if meta.IsDefined("compatibility", "fallback_app_id") && cfg.Compatibility.FallbackAppID != cfg.AppID {
+			return nil, fmt.Errorf("conflicting app_id and compatibility.fallback_app_id")
+		}
+		cfg.Compatibility.FallbackAppID = cfg.AppID
 	}
 	cfg.applyDefaults()
 	if err := cfg.validate(); err != nil {
@@ -90,7 +128,7 @@ func Load(path string) (*Config, error) {
 }
 
 func (c *Config) applyDefaults() {
-	if c.DeviceID == "" {
+	if c.DeviceID == "" && c.Version != 2 {
 		c.DeviceID = DefaultDeviceID
 	}
 	if c.BaseURL == "" {
@@ -122,7 +160,7 @@ func (c *Config) validate() error {
 	if c.Keystore == "" {
 		return fmt.Errorf("keystore path is required")
 	}
-	if !isUpperHex32(c.DeviceID) {
+	if !(c.Version == 2 && c.DeviceID == "") && !isUpperHex32(c.DeviceID) {
 		return fmt.Errorf("device_id must be 32 uppercase hex chars, got %q", c.DeviceID)
 	}
 	if !strings.HasPrefix(c.BaseURL, "https://") && !strings.HasPrefix(c.BaseURL, "http://") {
@@ -242,4 +280,9 @@ func SplitHostPort(addr string) (host string, port string, err error) {
 // GatewayServerName returns an explicit TLS certificate identity override.
 func (c *Config) GatewayServerName() string {
 	return c.Compatibility.GatewayServerName
+}
+
+// SessionOptions translates the legacy file DTO to normalized session settings.
+func (c *Config) SessionOptions() settings.Session {
+	return settings.Session{BaseURL: c.BaseURL, DeviceID: c.DeviceID, Platform: c.Platform, ClientType: c.ClientType, LoginDomain: c.LoginDomain, Keystore: c.Keystore, StateFile: c.StateFile, Gateways: append([]string(nil), c.Gateways...), DNS: append([]string(nil), c.DNS...), Compatibility: c.Compatibility.Clone(), GatewayFilter: c.Version == 2 && c.Gateways != nil, LegacyGatewayOverride: c.Version != 2 && len(c.Gateways) > 0, DNSConfigured: len(c.DNS) > 0}
 }

@@ -17,6 +17,9 @@ func (ephemeralStore) Load(context.Context) (*State, error) { return nil, nil }
 func (ephemeralStore) Save(context.Context, *State) error   { return nil }
 
 func TestECNULiveSession(t *testing.T) {
+	if os.Getenv("GEEKTRUST_LIVE_TESTS") != "1" {
+		t.Skip("online tests require explicit GEEKTRUST_LIVE_TESTS=1")
+	}
 	path := os.Getenv("GEEKTRUST_ECNU_KEYSTORE")
 	if path == "" {
 		t.Skip("explicit live credential required")

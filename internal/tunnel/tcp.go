@@ -66,6 +66,11 @@ type tcpAuthRequest struct {
 
 // TCPAuthError is an explicit gateway authentication rejection. It is terminal
 // across both gateway selection and stream-to-L3 compatibility fallback.
+type TCPSetupError struct{ Err error }
+
+func (e *TCPSetupError) Error() string { return "TCP stream setup: " + e.Err.Error() }
+func (e *TCPSetupError) Unwrap() error { return e.Err }
+
 type TCPAuthError struct{ Code int64 }
 
 func (e *TCPAuthError) Error() string {
@@ -123,6 +128,10 @@ func ShouldFallbackToL3(err error) bool {
 	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
 	}
+	var setup *TCPSetupError
+	if !errors.As(err, &setup) {
+		return false
+	}
 	var rejected *TCPAuthError
 	if errors.As(err, &rejected) {
 		return false
@@ -133,7 +142,7 @@ func ShouldFallbackToL3(err error) bool {
 	}
 	// Only incomplete setup exchanges can indicate an unsupported stream path.
 	// TLS verification, authentication rejection and unknown failures are terminal.
-	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
+	return (errors.Is(setup.Err, io.EOF) || errors.Is(setup.Err, io.ErrUnexpectedEOF))
 }
 
 // DialTCP opens an aTrust TCP proxy connection. TCP uses the server's stream
@@ -173,14 +182,14 @@ func (m *Manager) DialTCP(ctx context.Context, ip string, port int, appID, domai
 			m.logger.Debug("direct TCP tunnel established", "addr", addr, "target", net.JoinHostPort(ip, strconv.Itoa(port)))
 			return tunneled, nil
 		}
-		lastErr = err
+		lastErr = &TCPSetupError{Err: err}
 		var rejected *TCPAuthError
 		if errors.As(err, &rejected) {
 			return nil, err
 		}
 		var status *TCPStatusError
 		if errors.As(err, &status) && status.Status != 0x01 {
-			return nil, err
+			return nil, lastErr
 		}
 		lines.ReportFailure(addr)
 		m.logger.Debug("direct TCP line failed", "addr", addr, "err", err)

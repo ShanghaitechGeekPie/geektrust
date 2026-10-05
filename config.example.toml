@@ -1,87 +1,43 @@
-# geekTrust 手工配置模板。推荐改用 `geektrust init`，它会生成唯一的 device_id
-# 并写入可直接使用的 client 模式配置。
+# geekTrust 配置版本 2。相对路径相对于本文件。
+# 上科大只需提供已有 Passkey；缺省启用本地代理和 Web 面板。
+config_version = 2
 
-# ---- 登录 ----
-# passkey 凭据文件（由 `geektrust init --bind-passkey` 或 shanghaitech-ids-passkey 的 bind 命令生成）。
+[auth.passkey]
 keystore = "./ids-passkey.keystore"
 
-# 32 位大写十六进制，每个安装必须不同。可由 `geektrust init` 生成；首次登录后不要修改。
-device_id = "REPLACE_WITH_32_UPPERCASE_HEX"
+# 下列分组可按需启用。省略表示使用默认值。
+# [controller]
+# url = "https://vpn.shanghaitech.edu.cn"
+# deployment = "auto" # auto / shanghaitech / ecnu / generic
+# platform = "Mac"   # 控制器协议参数，与本机系统无关
 
-# ---- 控制器 ----
-base_url = "https://vpn.shanghaitech.edu.cn"
-platform = "Mac"            # 控制器协议参数，大小写敏感，与运行操作系统无关
+# [auth]
+# mode = "auto"      # auto / client / browser
+# login_domain = ""
+# device_id = ""     # 缺省读取或创建持久身份；升级时保留既有 ID
 
-# client 模式会在首次短信验证后尝试绑定授信终端，绑定成功后通常不再要求短信。
-# 省略时默认为 browser。
-client_type = "client"
+# [proxy.socks5]
+# listen = "127.0.0.1:1080" # 空字符串禁用
+# [proxy.http]
+# listen = "127.0.0.1:8080"
+# [web]
+# listen = "127.0.0.1:8081" # 只允许回环地址；空字符串禁用
 
-# 留空时从控制器发现 CAS 登录域，多登录域时必须明确选择。
-login_domain = ""
+# [dns]
+# strategy = "auto"  # auto 保留 CLI 的既有顺序；controller 只走控制器 DNS
+# servers = []       # 空列表使用控制器下发的 DNS
 
-# ---- 网关线路 ----
-# 留空 = 从上游 clientResource 自动获取(nodeGroup 地址);
-# 填写则筛选服务端分配的网关(格式 host:port,默认端口 441)，不会跨组覆盖。
-gateways = []
-# gateways = ["119.78.254.241:441", "59.78.171.241:441"]
+# [storage]
+# directory = ""     # 缺省使用平台用户私有持久目录
+# legacy_state = ""  # 仅用于保留既有加密会话路径，不删除原缓存和密钥
 
-# ---- DNS ----
-# 可选：覆盖服务端下发的隧道 DNS（只填 IP，端口固定 53）。
-# 域名先用公共 DNS（223.5.5.5、119.29.29.29）和系统 DNS 解析，并忽略 Clash 等代理
-# 返回的 198.18.0.0/15 fake-ip；没有可用 IPv4 时，再经 VPN 查询这些服务器。
-dns = []
-# dns = ["10.15.44.11", "10.13.6.2"]
+# [logging]
+# level = "info"
 
-# ---- 会话状态 ----
-# 加密的会话文件。密钥自动生成在同目录的 <state_file>.key，两个文件都只允许当前用户读写。
-state_file = "./state.enc"
-
-# ---- 日志 ----
-log_level = "info"
-
-# ---- 部署兼容选项 ----
-# 默认严格模式；不根据控制器域名自动启用。修改后重新启动客户端。
-[compatibility]
-# 仅在资源规则没有匹配时提交此 appId；仍由服务端验证授权。
-fallback_app_id = ""
-# 仅在当前控制器未下发任何网关时使用；必须写完整 host:port。
-fallback_gateways = []
-# IP 网关使用的 TLS 证书域名；不会关闭证书验证。
-gateway_server_name = ""
-# 指定网关组缺少地址时，允许使用已下发的完整网关列表。
-missing_gateway_group_fallback = false
-# TCP 流协议不兼容时尝试 L3；明确拒绝、不可达、取消不触发回退。
-tcp_to_l3_fallback = false
-
-# 上海科大旧部署需要兼容时，可逐项将上述值替换为：
-# fallback_app_id = "681165d0-1c77-11ed-8650-cd35a51aa42a"
-# fallback_gateways = ["119.78.254.241:441", "59.78.171.241:441"]
-# gateway_server_name = "vpn.shanghaitech.edu.cn"
-# missing_gateway_group_fallback = true
-# tcp_to_l3_fallback = true
-# 如需指定 CAS 登录域，在文件顶部设置 login_domain = "Shanghaitech.edu.cn"。
-
-# 可选：覆盖发送给网关的进程元数据。字段必须全部填写。
-# 未配置时沿用已实现的协议值：流式 TCP 为 Linux Chrome/SSH，L3 为 macOS aTrust。
-# 这些字段不代表本机进程检测结果，也不改变授权。
-# [compatibility.process_identity]
-# name = "my-client"
-# platform = "Windows"
-# path = "my-client.exe"
-
-# ---- 代理入口 ----
-# 两个代理都没有认证，只应监听回环地址（127.0.0.1）。监听其他地址会让
-# 同一网络中的其他设备使用你的 VPN 会话。
-[inbound.socks5]
-enabled = true
-listen = "127.0.0.1:1080"
-
-[inbound.http]
-enabled = true
-listen = "127.0.0.1:8080"
-
-# ---- Web 面板 ----
-# `run` 期间提供本地面板，省略时默认启用。listen 必须是回环地址，且不能使用 80 端口。
-[web]
-enabled = true
-listen = "127.0.0.1:8081"
+# 高级设置只在实际部署需要时填写。证书验证始终开启。
+# [tls.gateway]
+# server_name = ""
+# ca_file = ""
+# [routing]
+# gateway_filter = [] # 显式空列表拒绝所有线路；省略不额外筛选
+# fallback_app_id = ""

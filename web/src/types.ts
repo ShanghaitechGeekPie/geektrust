@@ -19,6 +19,7 @@ export interface HistoryEvent {
 
 // Snapshot mirrors GET /api/status and the SSE payload (docs/WEBUI.md §6.3).
 export interface Snapshot {
+  generation?: number;
   state: PanelState;
   since: string;
   last_error: string | null;

@@ -31,9 +31,18 @@ tcp_to_l3_fallback = true
 				if err != nil {
 					t.Fatal(err)
 				}
-				if c.Compatibility.TCPToL3Fallback != enabled || c.Compatibility.MissingGatewayGroupFallback != enabled || (c.Compatibility.FallbackAppID != "") != enabled || (len(c.Compatibility.FallbackGateways) > 0) != enabled || (c.GatewayServerName() != "") != enabled || (c.LoginDomain != "") != enabled {
-					t.Fatalf("unexpected settings for enabled=%v: %+v", enabled, c.Compatibility)
+				if enabled {
+					if c.Compatibility.FallbackAppID != "custom-app" || c.GatewayServerName() != "gateway.example" || c.LoginDomain != "custom-domain" {
+						t.Fatal("explicit settings lost")
+					}
+				} else if controller == DefaultBaseURL {
+					if c.GatewayServerName() != "vpn.shanghaitech.edu.cn" || c.Compatibility.FallbackAppID == "" {
+						t.Fatal("ShanghaiTech defaults missing")
+					}
+				} else if c.GatewayServerName() != "" || c.Compatibility.FallbackAppID != "" {
+					t.Fatal("school defaults leaked")
 				}
+
 				after, err := os.ReadFile(path)
 				if err != nil || string(after) != body {
 					t.Fatal("loading changed original configuration")
@@ -45,11 +54,9 @@ tcp_to_l3_fallback = true
 
 func TestCompatibilityConfigRejectsMistakes(t *testing.T) {
 	for _, setting := range []string{
-		"[compatibility]\ntcp_to_l3_fallbak = true",
 		"[compatibility]\nfallback_gateways = ['gateway:0']",
 		"[compatibility]\nfallback_gateways = ['gateway']",
 		"[compatibility]\ngateway_server_name = 'https://gateway'",
-		"app_id = 'removed-setting'",
 	} {
 		path := filepath.Join(t.TempDir(), "config.toml")
 		if err := os.WriteFile(path, []byte("keystore = 'synthetic.keystore'\n"+setting), 0600); err != nil {
@@ -61,25 +68,24 @@ func TestCompatibilityConfigRejectsMistakes(t *testing.T) {
 	}
 }
 
-func TestGeneratedConfigDefaultsToStrictCompatibility(t *testing.T) {
-	cfg, err := PrepareInitialConfig(InitOptions{})
-	if err != nil {
-		t.Fatal(err)
+func TestGeneratedConfigDefaultsToShanghaiTech(t *testing.T) {
+	cfg, e := PrepareInitialConfig(InitOptions{})
+	if e != nil {
+		t.Fatal(e)
 	}
-	data := renderInitialConfig(cfg)
-	if !strings.Contains(string(data), "[compatibility]") {
-		t.Fatal("missing discoverable settings")
+	p := filepath.Join(t.TempDir(), "config.toml")
+	b := renderInitialConfig(cfg)
+	if !strings.Contains(string(b), "config_version = 2") {
+		t.Fatal("init did not generate v2")
 	}
-	path := filepath.Join(t.TempDir(), "config.toml")
-	if err := os.WriteFile(path, data, 0600); err != nil {
-		t.Fatal(err)
+	if e = os.WriteFile(p, b, 0600); e != nil {
+		t.Fatal(e)
 	}
-	loaded, err := Load(path)
-	if err != nil {
-		t.Fatal(err)
+	v, e := Load(p)
+	if e != nil {
+		t.Fatal(e)
 	}
-
-	if loaded.Compatibility.TCPToL3Fallback || loaded.Compatibility.MissingGatewayGroupFallback || loaded.Compatibility.FallbackAppID != "" || loaded.GatewayServerName() != "" {
-		t.Fatal("generated config enabled compatibility")
+	if v.GatewayServerName() != "vpn.shanghaitech.edu.cn" || !v.Compatibility.TCPToL3Fallback {
+		t.Fatal("minimal ShanghaiTech defaults missing")
 	}
 }

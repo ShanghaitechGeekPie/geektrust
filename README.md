@@ -48,7 +48,7 @@ brew install uv
 
 1. 用系统安全随机源生成 128 位 `device_id`。
 2. keystore 不存在时，通过 `uvx` 在隔离环境中运行 [shanghaitech-ids-passkey](https://github.com/vvbbnn00/shanghaitech-ids-passkey)，打开浏览器完成绑定并生成 keystore。不会向全局环境安装任何 Python 包。
-3. 写入 `client_type = "client"` 的配置，启用本地 SOCKS5、HTTP 代理和 Web 面板。
+3. 写入 `auth.mode = "client"` 的版本 2 配置，启用本地 SOCKS5、HTTP 代理和 Web 面板。
 
 配置文件已存在时，init 会拒绝覆盖。确实需要重建时再加 `--force`。
 
@@ -89,69 +89,31 @@ brew install uv
 
 ## 配置
 
-推荐用 `geektrust init` 生成配置。生成结果如下（另含一行注释）：
+`geektrust init` 生成版本 2 配置，保留设备 ID，并使用已有 Passkey。上科大的最小手工配置为：
 
 ```toml
+config_version = 2
+
+[auth.passkey]
 keystore = "./ids-passkey.keystore"
-device_id = "<init 生成的 32 位大写十六进制值>"
-base_url = "https://vpn.shanghaitech.edu.cn"
-platform = "Mac"
-client_type = "client"
-state_file = "./state.enc"
-gateways = []
-dns = []
-log_level = "info"
-
-[inbound.socks5]
-enabled = true
-listen = "127.0.0.1:1080"
-
-[inbound.http]
-enabled = true
-listen = "127.0.0.1:8080"
-
-[web]
-enabled = true
-listen = "127.0.0.1:8081"
 ```
 
-手工编写配置可参考 [`config.example.toml`](config.example.toml)。
+相对路径以配置文件目录为准。设备身份和加密会话放在平台用户持久目录；上科大必需的网关证书域名由程序提供，证书验证继续开启。普通用户无需填写应用 ID、网关 IP 或协议回退开关。
 
-主要配置项：
+配置按 `controller`、`auth`、`proxy`、`web`、`dns`、`storage`、`logging` 分组。监听地址省略时采用默认值，空字符串表示禁用。`auth.mode` 支持 `auto`、`client`、`browser`；browser 模式不能绑定授信终端。
 
-- `device_id`：设备的稳定身份。修改后服务器会把它视为新设备，需要重新验证和绑定。
-- `client_type`：推荐 `client`。手写配置省略该项时默认为 `browser`。
-- `keystore`：passkey 私钥文件。不要泄露，也不要提交到版本库。
-- `state_file`：加密的会话状态。密钥保存在同目录的 `<state_file>.key`，两个文件都只允许当前用户读写。
-- `gateways`：留空时使用服务端下发的线路。
-- `dns`：通常留空，仅在需要覆盖服务端下发的隧道 DNS 时设置。
+旧格式继续可读，不自动重写。检查和迁移命令：
 
-SOCKS5 和 HTTP 代理没有身份认证，只应监听 `127.0.0.1`。如果改成 `0.0.0.0`，同一网络中的其他设备也能使用你的 VPN 会话。
-
-### 部署兼容选项
-
-所有控制器默认采用严格模式，不再根据学校域名启用兼容行为。
-在配置文件中添加 `[compatibility]`，只开启目标部署需要的选项：
-
-```toml
-[compatibility]
-fallback_app_id = ""
-fallback_gateways = []
-gateway_server_name = ""
-missing_gateway_group_fallback = false
-tcp_to_l3_fallback = false
+```sh
+./geektrust -config config.toml config check
+./geektrust -config config.toml config show
+./geektrust -config config.toml config migrate
+./geektrust -config config.toml config migrate --write
 ```
 
-应用 ID 和网关地址仅用于缺失数据时的兜底；已有资源规则和非空网关组优先。
-TCP→L3 回退不覆盖认证拒绝、连接不允许、不可达或取消。
-TLS 域名覆盖仍验证证书；选项拼写错误会拒绝加载配置。
-修改后重新启动客户端；关闭选项后，缓存会话不会恢复旧的兜底网关。
-旧的顶层 `app_id` 已移除，请明确填写 `compatibility.fallback_app_id`。
-上海科大的可选值和进程元数据覆盖示例见 [config.example.toml](config.example.toml)。
+`migrate` 默认只预览，`--write` 保留 `.v1.bak` 备份。旧网关覆盖和新网关筛选含义不同，不能自动转换；复杂的显式兼容设置需要人工选择。设备 ID、凭据、签名计数器和原加密缓存不会被迁移命令删除或重置。
 
-### browser 兼容模式
-
-只有在控制器不支持 client 模式时，才把 `client_type` 设为 `browser`。browser 模式不能绑定授信终端，会话彻底失效后可能再次要求短信。
+完整设置见 [config.example.toml](config.example.toml)。SOCKS5 和 HTTP 代理没有身份认证，默认监听回环地址；配置为非回环地址后，同一网络中的其他设备也能使用你的 VPN 会话。
 
 ## Web 面板
 
@@ -159,7 +121,6 @@ TLS 域名覆盖仍验证证书；选项拼写错误会拒绝加载配置。
 
 ```toml
 [web]
-enabled = true
 listen = "127.0.0.1:8081"
 ```
 
@@ -175,7 +136,7 @@ listen = "127.0.0.1:8081"
 
 - `listen` 必须是回环地址，且不能使用 80 端口，否则配置加载失败。需要远程访问时用 SSH 转发：`ssh -L 8081:127.0.0.1:8081 user@host`。
 - 面板启动失败（如端口被占用或与代理端口冲突）只会记录警告并跳过面板，不影响 VPN 和代理。
-- `enabled = false` 时不启动面板，短信只能在终端输入。
+- 版本 2 使用 `listen = ""` 禁用面板；旧格式继续读取 `enabled = false`。短信只能在终端输入。
 
 ## 常用命令
 
@@ -224,7 +185,7 @@ curl -x http://127.0.0.1:8080 https://library.shanghaitech.edu.cn/qbsjk/list.htm
 
 路由规则来自服务端下发的应用表，支持精确域名、域名后缀、精确 IP、CIDR、IP 区间和端口范围；范围越小的规则优先级越高。
 
-域名先用公共 DNS 和系统 DNS 解析。没有可用 IPv4 结果时，再通过 VPN 查询服务端下发的校内 DNS，以解析只在校内可见的域名。`dns` 配置可覆盖这些隧道 DNS。
+域名先用公共 DNS 和系统 DNS 解析。没有可用 IPv4 结果时，再通过 VPN 查询服务端下发的校内 DNS，以解析只在校内可见的域名。版本 2 的 `dns.servers` 可覆盖这些隧道 DNS；`dns.strategy = "controller"` 只走控制器 DNS。
 
 DNS 查询先用 UDP，失败或回复被截断时改用 TCP；持续失败的服务器会暂时跳过并改用备用服务器，恢复后自动重新使用。具体超时和冷却规则见 [`docs/TECHNICAL.md`](docs/TECHNICAL.md) §12.5。
 

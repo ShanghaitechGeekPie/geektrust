@@ -7,13 +7,13 @@ import (
 	"testing"
 )
 
-func TestExampleLogLevelIsTopLevel(t *testing.T) {
+func TestExampleLoggingGroupCanBeEnabled(t *testing.T) {
 	b, err := os.ReadFile("../../config.example.toml")
 	if err != nil {
 		t.Fatal(err)
 	}
 	s := strings.ReplaceAll(string(b), "REPLACE_WITH_32_UPPERCASE_HEX", "0123456789ABCDEF0123456789ABCDEF")
-	s = strings.Replace(s, `log_level = "info"`, `log_level = "debug"`, 1)
+	s = strings.Replace(s, "# [logging]\n# level = \"info\"", "[logging]\nlevel = \"debug\"", 1)
 	path := filepath.Join(t.TempDir(), "config.toml")
 	if err := os.WriteFile(path, []byte(s), 0600); err != nil {
 		t.Fatal(err)

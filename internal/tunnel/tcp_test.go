@@ -13,9 +13,9 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/ShanghaitechGeekPie/geektrust/deployment"
 	"github.com/ShanghaitechGeekPie/geektrust/internal/sdpc"
 	"github.com/ShanghaitechGeekPie/geektrust/internal/session"
+	"github.com/ShanghaitechGeekPie/geektrust/internal/settings"
 )
 
 func TestBuildTCPRequestCombinesAuthAndDestination(t *testing.T) {
@@ -202,12 +202,12 @@ func TestDirectGatewaysUsesAssignedNodeGroup(t *testing.T) {
 }
 
 func TestTCPFallbackBoundaries(t *testing.T) {
-	for _, err := range []error{nil, errors.Join(&TCPAuthError{Code: 403}, io.EOF), errors.New("unclassified failure"), context.Canceled, context.DeadlineExceeded, &TCPStatusError{Status: 0x01}, &TCPStatusError{Status: 0x02}, &TCPStatusError{Status: 0x03}, &TCPStatusError{Status: 0x04}, &TCPStatusError{Status: 0x05}, &TCPStatusError{Status: 0x06}} {
+	for _, err := range []error{io.EOF, io.ErrUnexpectedEOF, &TCPStatusError{Status: 0x07}, nil, errors.Join(&TCPAuthError{Code: 403}, io.EOF), errors.New("unclassified failure"), context.Canceled, context.DeadlineExceeded, &TCPStatusError{Status: 0x01}, &TCPStatusError{Status: 0x02}, &TCPStatusError{Status: 0x03}, &TCPStatusError{Status: 0x04}, &TCPStatusError{Status: 0x05}, &TCPStatusError{Status: 0x06}} {
 		if ShouldFallbackToL3(err) {
 			t.Fatalf("unexpected fallback: %v", err)
 		}
 	}
-	if !ShouldFallbackToL3(&TCPStatusError{Status: 0x07}) || !ShouldFallbackToL3(io.EOF) {
+	if !ShouldFallbackToL3(&TCPSetupError{Err: &TCPStatusError{Status: 0x07}}) || !ShouldFallbackToL3(&TCPSetupError{Err: io.EOF}) {
 		t.Fatal("legacy protocol/setup fallback removed")
 	}
 }
@@ -226,7 +226,7 @@ func TestTCPAuthenticationDenialNeverFallsBack(t *testing.T) {
 }
 
 func TestTCPConfiguredProcessIdentity(t *testing.T) {
-	identity := &deployment.ProcessIdentity{Name: "custom-client", Platform: "Windows", Path: "custom-client.exe"}
+	identity := &settings.ProcessIdentity{Name: "custom-client", Platform: "Windows", Path: "custom-client.exe"}
 	packet, err := buildTCPRequest(&session.Credential{ProcessIdentity: identity}, "192.0.2.1", 22, "app", "")
 	if err != nil {
 		t.Fatal(err)

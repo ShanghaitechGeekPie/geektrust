@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	defaults "github.com/ShanghaitechGeekPie/geektrust/internal/deployment"
 	"net"
 	"net/url"
 	"strconv"
@@ -356,7 +357,7 @@ func (c *Client) parseResource(cr *clientResource) *Resource {
 			{
 				for _, d := range domains {
 					res.DomainRules = append(res.DomainRules, DomainRule{
-						Domain: normalizeHost(d.host), IP: firstIP, AppID: app.ID, Port: d.port, Proto: d.proto,
+						Domain: normalizeHost(d.host), IP: c.domainAddress(firstIP), AppID: app.ID, Port: d.port, Proto: d.proto,
 					})
 				}
 			}
@@ -464,4 +465,14 @@ func isDottedIPv4(s string) bool {
 	}
 	ip := net.ParseIP(s)
 	return ip != nil && ip.To4() != nil
+}
+
+func (c *Client) domainAddress(ip string) string {
+	if c.DomainMapping != nil {
+		if !*c.DomainMapping {
+			return ""
+		}
+		return ip
+	}
+	return defaults.DomainAddress(c.BaseURL, ip)
 }

@@ -81,7 +81,7 @@ func (s *Server) handleHTTPConnectTCP(ctx context.Context, client net.Conn, br *
 		writeHTTPStatus(client, http.StatusBadGateway, "host not resolvable")
 		return
 	}
-	upstream, err := s.dialer.Dial(setupCtx, target.IP, port, target.AppID, target.Domain)
+	upstream, err := s.dialTarget(setupCtx, target, port, "tcp")
 	if err != nil {
 		s.logger.Warn("http dial failed", "host", host, "err", err)
 		writeHTTPStatus(client, http.StatusBadGateway, "tunnel dial failed")

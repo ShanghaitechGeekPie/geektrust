@@ -115,7 +115,7 @@ func (s *Server) handleSOCKSConnect(ctx context.Context, client net.Conn, destin
 		return
 	}
 
-	upstream, err := s.dialer.Dial(setupCtx, target.IP, destination.port, target.AppID, target.Domain)
+	upstream, err := s.dialTarget(setupCtx, target, destination.port, "tcp")
 	if err != nil {
 		s.logger.Warn("socks5 dial failed", "target", net.JoinHostPort(target.IP, strconv.Itoa(destination.port)), "err", err)
 		_ = writeSOCKSReply(client, socksReplyRefused, socksAddress{})

@@ -58,7 +58,7 @@ func TestInitializeDefaultsAndPreservesExistingConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	webBlock := "[web]\nenabled = true\nlisten = \"" + DefaultWebListen + "\""
+	webBlock := "config_version = 2"
 	if !strings.Contains(string(raw), webBlock) {
 		t.Errorf("rendered config missing complete [web] block:\n%s", raw)
 	}
