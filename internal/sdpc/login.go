@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+
+	"github.com/ShanghaitechGeekPie/geektrust/auth"
 )
 
 // CasTicket runs the CAS redirect chain:
@@ -139,14 +141,22 @@ func (c *Client) AuthCheck(ctx context.Context) (needSMS bool, err error) {
 		return false, err
 	}
 	if data.NextService != "" {
-		return data.NextService == "auth/sms", nil
-	}
-	for _, item := range data.NextServiceList {
-		if item.AuthType == "auth/sms" {
+		switch data.NextService {
+		case "auth/sms":
 			return true, nil
+		default:
+			return false, &auth.UnsupportedError{Method: data.NextService}
 		}
 	}
-	return false, nil
+	needSMS = false
+	for _, item := range data.NextServiceList {
+		if item.AuthType == "auth/sms" {
+			needSMS = true
+		} else {
+			return false, &auth.UnsupportedError{Method: item.AuthType}
+		}
+	}
+	return needSMS, nil
 }
 
 // SendSMS triggers the verification text.

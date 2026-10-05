@@ -16,7 +16,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"geektrust/internal/privatefile"
+	"github.com/ShanghaitechGeekPie/geektrust/internal/privatefile"
 )
 
 // State is the persisted session (encrypted, 0600).

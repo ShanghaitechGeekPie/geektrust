@@ -1,7 +1,7 @@
 package session
 
-// GatewaysForGroup respects explicit configuration overrides. ShanghaiTech also
-// retains the old flattened-list fallback for incomplete controller responses.
+// GatewaysForGroup restricts configured gateways to the assigned group. Missing
+// groups may use the flattened list only when compatibility explicitly allows it.
 func (c *Credential) GatewaysForGroup(group string) []string {
 	var assigned []string
 	if c.Policy != nil {
@@ -9,6 +9,14 @@ func (c *Credential) GatewaysForGroup(group string) []string {
 			assigned = c.Policy.Gateways
 		} else {
 			assigned = c.Policy.NodeGroups[group]
+		}
+	}
+	if len(assigned) == 0 && (group == "" || c.MissingGatewayGroupFallback) {
+		if c.Policy != nil {
+			assigned = c.Policy.Gateways
+		}
+		if len(assigned) == 0 {
+			assigned = c.Gateways
 		}
 	}
 	if c.GatewayOverride {
@@ -21,13 +29,7 @@ func (c *Credential) GatewaysForGroup(group string) []string {
 				}
 			}
 		}
-		if len(matching) != 0 {
-			return matching
-		}
-		return append([]string(nil), c.Gateways...)
-	}
-	if len(assigned) == 0 && (group == "" || c.LegacyRouting) {
-		assigned = c.Gateways
+		return matching
 	}
 	return append([]string(nil), assigned...)
 }

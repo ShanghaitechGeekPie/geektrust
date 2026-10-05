@@ -9,11 +9,13 @@ import (
 	"errors"
 	"io"
 	"net"
+	"strings"
 	"syscall"
 	"testing"
 
-	"geektrust/internal/sdpc"
-	"geektrust/internal/session"
+	"github.com/ShanghaitechGeekPie/geektrust/deployment"
+	"github.com/ShanghaitechGeekPie/geektrust/internal/sdpc"
+	"github.com/ShanghaitechGeekPie/geektrust/internal/session"
 )
 
 func TestBuildTCPRequestCombinesAuthAndDestination(t *testing.T) {
@@ -199,13 +201,43 @@ func TestDirectGatewaysUsesAssignedNodeGroup(t *testing.T) {
 	}
 }
 
-func TestLegacyTCPFallbackBoundaries(t *testing.T) {
-	for _, err := range []error{nil, context.Canceled, context.DeadlineExceeded, &TCPStatusError{Status: 0x03}, &TCPStatusError{Status: 0x04}, &TCPStatusError{Status: 0x05}, &TCPStatusError{Status: 0x06}} {
+func TestTCPFallbackBoundaries(t *testing.T) {
+	for _, err := range []error{nil, errors.Join(&TCPAuthError{Code: 403}, io.EOF), errors.New("unclassified failure"), context.Canceled, context.DeadlineExceeded, &TCPStatusError{Status: 0x01}, &TCPStatusError{Status: 0x02}, &TCPStatusError{Status: 0x03}, &TCPStatusError{Status: 0x04}, &TCPStatusError{Status: 0x05}, &TCPStatusError{Status: 0x06}} {
 		if ShouldFallbackToL3(err) {
 			t.Fatalf("unexpected fallback: %v", err)
 		}
 	}
-	if !ShouldFallbackToL3(&TCPStatusError{Status: 0x02}) || !ShouldFallbackToL3(io.EOF) {
+	if !ShouldFallbackToL3(&TCPStatusError{Status: 0x07}) || !ShouldFallbackToL3(io.EOF) {
 		t.Fatal("legacy protocol/setup fallback removed")
+	}
+}
+
+func TestTCPAuthenticationDenialNeverFallsBack(t *testing.T) {
+	body := []byte(`{"code":403,"message":"sensitive-server-text"}`)
+	packet := make([]byte, 2)
+	binary.BigEndian.PutUint16(packet, uint16(len(body)))
+	err := readTCPProtocolResponse(bytes.NewReader(append(packet, body...)))
+	if err == nil || ShouldFallbackToL3(err) {
+		t.Fatal("authentication denial was accepted or retried")
+	}
+	if strings.Contains(err.Error(), "sensitive-server-text") {
+		t.Fatal("server response leaked")
+	}
+}
+
+func TestTCPConfiguredProcessIdentity(t *testing.T) {
+	identity := &deployment.ProcessIdentity{Name: "custom-client", Platform: "Windows", Path: "custom-client.exe"}
+	packet, err := buildTCPRequest(&session.Credential{ProcessIdentity: identity}, "192.0.2.1", 22, "app", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	length := int(binary.BigEndian.Uint16(packet[5:7]))
+	var request tcpAuthRequest
+	if err := json.Unmarshal(packet[7:7+length], &request); err != nil {
+		t.Fatal(err)
+	}
+	process := request.Env.Application.Runtime.Process
+	if process.Name != identity.Name || process.Platform != identity.Platform || process.Path != identity.Path || process.Fingerprint != request.ProcHash || process.Fingerprint == chromeFingerprint {
+		t.Fatal("configured identity overridden by port heuristic")
 	}
 }

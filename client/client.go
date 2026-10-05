@@ -11,18 +11,22 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
-	"geektrust/internal/config"
-	"geektrust/internal/idsauth"
-	"geektrust/internal/l3"
-	"geektrust/internal/resolver"
-	"geektrust/internal/session"
-	"geektrust/internal/tunnel"
+	"github.com/ShanghaitechGeekPie/geektrust/auth"
+	"github.com/ShanghaitechGeekPie/geektrust/deployment"
+	"github.com/ShanghaitechGeekPie/geektrust/internal/config"
+	"github.com/ShanghaitechGeekPie/geektrust/internal/idsauth"
+	"github.com/ShanghaitechGeekPie/geektrust/internal/l3"
+	"github.com/ShanghaitechGeekPie/geektrust/internal/resolver"
+	"github.com/ShanghaitechGeekPie/geektrust/internal/session"
+	"github.com/ShanghaitechGeekPie/geektrust/internal/tunnel"
 )
 
 // BlobStore is scoped to a single identity/deployment by the embedding application.
@@ -105,7 +109,10 @@ func ValidatePasskey(b []byte) error {
 }
 
 type Options struct {
-	AppID                 string
+	// CheckTarget may reject a resolved IPv4 destination before transport opens.
+	// It is called concurrently and cannot grant access outside controller policy.
+	CheckTarget           func(netip.Addr) error
+	Compatibility         deployment.Compatibility
 	Gateways              []string
 	DNS                   []string
 	ControllerURL         string
@@ -114,6 +121,8 @@ type Options struct {
 	LoginDomain           string
 	ClientMode            bool
 	Authenticator         Authenticator
+	ControllerLogin       auth.ControllerLogin
+	ChallengeHandler      auth.Handler
 	SessionStore          BlobStore
 	Transport             http.RoundTripper
 	DialContext           func(context.Context, string, string) (net.Conn, error)
@@ -121,7 +130,6 @@ type Options struct {
 	GatewayTLSConfig      *tls.Config
 	GatewayTrustStore     GatewayTrustStore
 	Logger                *slog.Logger
-	PromptSMS             func(context.Context) (string, error)
 }
 
 type Capabilities struct{ IPv4TCP, IPv4UDP, IPv4ICMP, IPv6Targets, IPv6Gateway bool }
@@ -132,7 +140,8 @@ type Resource struct {
 type Info struct {
 	Gateways, DNS []string
 	Resources     []Resource
-	Capabilities  Capabilities
+	// Implemented describes library support, not negotiated or authorized access.
+	Implemented Capabilities
 }
 type TransportInfo struct {
 	Gateway     string
@@ -157,17 +166,18 @@ var ErrDatagramTooLarge = errors.New("UDP datagram exceeds tunnel MTU")
 var ErrDenied = errors.New("target is not authorized by controller policy")
 
 type Client struct {
-	provider  *session.Provider
-	manager   *tunnel.Manager
-	dialer    *l3.Dialer
-	resolver  *resolver.Resolver
-	ctx       context.Context
-	cancel    context.CancelFunc
-	mu        sync.Mutex
-	closed    bool
-	conns     map[*ownedConn]struct{}
-	transport *http.Transport
-	events    chan Event
+	checkTarget func(netip.Addr) error
+	provider    *session.Provider
+	manager     *tunnel.Manager
+	dialer      *l3.Dialer
+	resolver    *resolver.Resolver
+	ctx         context.Context
+	cancel      context.CancelFunc
+	mu          sync.Mutex
+	closed      bool
+	conns       map[*ownedConn]struct{}
+	transport   *http.Transport
+	events      chan Event
 }
 
 func New(opts Options) (*Client, error) {
@@ -178,11 +188,14 @@ func New(opts Options) (*Client, error) {
 	if len(opts.DeviceID) != 32 || strings.Trim(opts.DeviceID, "0123456789ABCDEF") != "" {
 		return nil, errors.New("persistent 32-character uppercase hexadecimal device ID required")
 	}
-	if opts.Authenticator == nil {
+	if opts.Authenticator == nil && opts.ControllerLogin == nil {
 		return nil, errors.New("authenticator required")
 	}
 	if opts.Platform == "" {
 		opts.Platform = "Mac"
+	}
+	if len(opts.Platform) > 64 || strings.IndexFunc(opts.Platform, unicode.IsControl) >= 0 {
+		return nil, errors.New("platform must be at most 64 bytes without control characters")
 	}
 	if opts.Logger == nil {
 		opts.Logger = slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -191,9 +204,16 @@ func New(opts Options) (*Client, error) {
 	if opts.ClientMode {
 		mode = "client"
 	}
-	cfg := &config.Config{BaseURL: strings.TrimRight(opts.ControllerURL, "/"), DeviceID: opts.DeviceID, Platform: opts.Platform, LoginDomain: opts.LoginDomain, ClientType: mode, AppID: opts.AppID, Gateways: append([]string(nil), opts.Gateways...), DNS: append([]string(nil), opts.DNS...)}
-	p := session.NewProvider(cfg, opts.Logger, opts.PromptSMS)
-	p.Authenticate = opts.Authenticator.Authenticate
+	cfg := &config.Config{BaseURL: strings.TrimRight(opts.ControllerURL, "/"), DeviceID: opts.DeviceID, Platform: opts.Platform, LoginDomain: opts.LoginDomain, ClientType: mode, Compatibility: opts.Compatibility.Clone(), Gateways: append([]string(nil), opts.Gateways...), DNS: append([]string(nil), opts.DNS...)}
+	if err := cfg.Compatibility.Validate(); err != nil {
+		return nil, err
+	}
+	p := session.NewProvider(cfg, opts.Logger, nil)
+	if opts.Authenticator != nil {
+		p.Authenticate = opts.Authenticator.Authenticate
+	}
+	p.ControllerLogin = opts.ControllerLogin
+	p.ChallengeHandler = opts.ChallengeHandler
 	p.Transport = opts.Transport
 	var ownedTransport *http.Transport
 	if p.Transport == nil {
@@ -219,7 +239,7 @@ func New(opts Options) (*Client, error) {
 	m.GatewayTrustStore = opts.GatewayTrustStore
 	d := &l3.Dialer{Manager: m, Provider: p, Logger: opts.Logger}
 	ctx, cancel := context.WithCancel(context.Background())
-	c := &Client{transport: ownedTransport, provider: p, manager: m, dialer: d, resolver: resolver.NewWithDialerOptions(p, d, opts.DialContext, opts.DisableSystemResolver), ctx: ctx, cancel: cancel, conns: make(map[*ownedConn]struct{}), events: make(chan Event, 16)}
+	c := &Client{checkTarget: opts.CheckTarget, transport: ownedTransport, provider: p, manager: m, dialer: d, resolver: resolver.NewWithDialerOptions(p, d, opts.DialContext, opts.DisableSystemResolver), ctx: ctx, cancel: cancel, conns: make(map[*ownedConn]struct{}), events: make(chan Event, 16)}
 	p.AddObserver(clientObserver{c})
 	go p.CheckLoop(ctx, 5*time.Minute)
 	return c, nil
@@ -267,7 +287,7 @@ func (c *Client) Connect(parent context.Context) (Info, error) {
 	if c.closed {
 		return Info{}, ErrClosed
 	}
-	info := Info{Gateways: append([]string(nil), cred.Gateways...), DNS: append([]string(nil), cred.DNS...), Capabilities: Capabilities{IPv4TCP: true, IPv4UDP: true, IPv6Gateway: true}}
+	info := Info{Gateways: append([]string(nil), cred.Gateways...), DNS: append([]string(nil), cred.DNS...), Implemented: Capabilities{IPv4TCP: true, IPv4UDP: true, IPv4ICMP: true, IPv6Gateway: true}}
 	for _, r := range cred.Policy.IPRules {
 		address := ""
 		switch {
@@ -340,6 +360,15 @@ func (c *Client) DialContext(parent context.Context, network, address string) (n
 	}
 	if target.AppID == "" {
 		return nil, ErrDenied
+	}
+	if c.checkTarget != nil {
+		ip, err := netip.ParseAddr(target.IP)
+		if err != nil {
+			return nil, err
+		}
+		if err := c.checkTarget(ip.Unmap()); err != nil {
+			return nil, err
+		}
 	}
 	var conn net.Conn
 	if protocol == "tcp" {

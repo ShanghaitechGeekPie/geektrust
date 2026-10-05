@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"geektrust/internal/tunnel"
+	"github.com/ShanghaitechGeekPie/geektrust/internal/tunnel"
 
 	"github.com/metacubex/gvisor/pkg/buffer"
 	"github.com/metacubex/gvisor/pkg/tcpip"

@@ -14,8 +14,8 @@ import (
 	"testing"
 	"time"
 
-	"geektrust/internal/config"
-	"geektrust/internal/sdpc"
+	"github.com/ShanghaitechGeekPie/geektrust/internal/config"
+	"github.com/ShanghaitechGeekPie/geektrust/internal/sdpc"
 )
 
 // recordObserver collects events and lets tests hook individual kinds.

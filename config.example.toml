@@ -10,17 +10,18 @@ device_id = "REPLACE_WITH_32_UPPERCASE_HEX"
 
 # ---- 控制器 ----
 base_url = "https://vpn.shanghaitech.edu.cn"
-platform = "Mac"            # 区分大小写，必须为 Mac
+platform = "Mac"            # 控制器协议参数，大小写敏感，与运行操作系统无关
 
 # client 模式会在首次短信验证后尝试绑定授信终端，绑定成功后通常不再要求短信。
 # 省略时默认为 browser。
 client_type = "client"
 
-# 可选：没有路由规则匹配时使用的兜底 appId。上海科技大学控制器会自动使用下面的值。
-# app_id = "681165d0-1c77-11ed-8650-cd35a51aa42a"
+# 留空时从控制器发现 CAS 登录域，多登录域时必须明确选择。
+login_domain = ""
 
 # ---- 网关线路 ----
-# 留空时使用服务端下发的线路；填写后改用这里的地址（host:port，端口默认 441）。
+# 留空 = 从上游 clientResource 自动获取(nodeGroup 地址);
+# 填写则筛选服务端分配的网关(格式 host:port,默认端口 441)，不会跨组覆盖。
 gateways = []
 # gateways = ["119.78.254.241:441", "59.78.171.241:441"]
 
@@ -36,8 +37,37 @@ dns = []
 state_file = "./state.enc"
 
 # ---- 日志 ----
-# debug / info / warn / error
 log_level = "info"
+
+# ---- 部署兼容选项 ----
+# 默认严格模式；不根据控制器域名自动启用。修改后重新启动客户端。
+[compatibility]
+# 仅在资源规则没有匹配时提交此 appId；仍由服务端验证授权。
+fallback_app_id = ""
+# 仅在当前控制器未下发任何网关时使用；必须写完整 host:port。
+fallback_gateways = []
+# IP 网关使用的 TLS 证书域名；不会关闭证书验证。
+gateway_server_name = ""
+# 指定网关组缺少地址时，允许使用已下发的完整网关列表。
+missing_gateway_group_fallback = false
+# TCP 流协议不兼容时尝试 L3；明确拒绝、不可达、取消不触发回退。
+tcp_to_l3_fallback = false
+
+# 上海科大旧部署需要兼容时，可逐项将上述值替换为：
+# fallback_app_id = "681165d0-1c77-11ed-8650-cd35a51aa42a"
+# fallback_gateways = ["119.78.254.241:441", "59.78.171.241:441"]
+# gateway_server_name = "vpn.shanghaitech.edu.cn"
+# missing_gateway_group_fallback = true
+# tcp_to_l3_fallback = true
+# 如需指定 CAS 登录域，在文件顶部设置 login_domain = "Shanghaitech.edu.cn"。
+
+# 可选：覆盖发送给网关的进程元数据。字段必须全部填写。
+# 未配置时沿用已实现的协议值：流式 TCP 为 Linux Chrome/SSH，L3 为 macOS aTrust。
+# 这些字段不代表本机进程检测结果，也不改变授权。
+# [compatibility.process_identity]
+# name = "my-client"
+# platform = "Windows"
+# path = "my-client.exe"
 
 # ---- 代理入口 ----
 # 两个代理都没有认证，只应监听回环地址（127.0.0.1）。监听其他地址会让

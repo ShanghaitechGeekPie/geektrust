@@ -12,7 +12,7 @@ geekTrust 是 aTrust VPN 的纯用户态客户端。它不创建虚拟网卡、�
 
 - 使用 IDS passkey 免密码登录。
 - client 模式在首次短信验证后会尝试绑定授信终端。绑定成功后，会话失效时可静默重登，通常不再要求短信。
-- TCP 优先使用网关原生流式通道；不可用或不兼容时自动回退到 L3 隧道。
+- TCP 优先使用网关原生流式通道；显式开启兼容选项后，流式命令不支持或提前关闭时可回退到 L3 隧道。
 - UDP 和 TCP 回退流量由 gVisor 用户态 IPv4 栈处理。
 - 会话自动恢复；有多条网关线路时错峰竞速，直接使用最先完成 TLS 握手的连接。
 
@@ -127,6 +127,27 @@ listen = "127.0.0.1:8081"
 - `dns`：通常留空，仅在需要覆盖服务端下发的隧道 DNS 时设置。
 
 SOCKS5 和 HTTP 代理没有身份认证，只应监听 `127.0.0.1`。如果改成 `0.0.0.0`，同一网络中的其他设备也能使用你的 VPN 会话。
+
+### 部署兼容选项
+
+所有控制器默认采用严格模式，不再根据学校域名启用兼容行为。
+在配置文件中添加 `[compatibility]`，只开启目标部署需要的选项：
+
+```toml
+[compatibility]
+fallback_app_id = ""
+fallback_gateways = []
+gateway_server_name = ""
+missing_gateway_group_fallback = false
+tcp_to_l3_fallback = false
+```
+
+应用 ID 和网关地址仅用于缺失数据时的兜底；已有资源规则和非空网关组优先。
+TCP→L3 回退不覆盖认证拒绝、连接不允许、不可达或取消。
+TLS 域名覆盖仍验证证书；选项拼写错误会拒绝加载配置。
+修改后重新启动客户端；关闭选项后，缓存会话不会恢复旧的兜底网关。
+旧的顶层 `app_id` 已移除，请明确填写 `compatibility.fallback_app_id`。
+上海科大的可选值和进程元数据覆盖示例见 [config.example.toml](config.example.toml)。
 
 ### browser 兼容模式
 

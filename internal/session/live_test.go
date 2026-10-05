@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"geektrust/internal/config"
+	"github.com/ShanghaitechGeekPie/geektrust/internal/config"
 )
 
 type ephemeralStore struct{}

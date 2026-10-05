@@ -20,13 +20,13 @@ import (
 	"syscall"
 	"time"
 
-	"geektrust/internal/config"
-	"geektrust/internal/inbound"
-	"geektrust/internal/l3"
-	"geektrust/internal/resolver"
-	"geektrust/internal/session"
-	"geektrust/internal/tunnel"
-	"geektrust/internal/webui"
+	"github.com/ShanghaitechGeekPie/geektrust/internal/config"
+	"github.com/ShanghaitechGeekPie/geektrust/internal/inbound"
+	"github.com/ShanghaitechGeekPie/geektrust/internal/l3"
+	"github.com/ShanghaitechGeekPie/geektrust/internal/resolver"
+	"github.com/ShanghaitechGeekPie/geektrust/internal/session"
+	"github.com/ShanghaitechGeekPie/geektrust/internal/tunnel"
+	"github.com/ShanghaitechGeekPie/geektrust/internal/webui"
 )
 
 // version is replaced by scripts/package-release.sh through the Go linker.

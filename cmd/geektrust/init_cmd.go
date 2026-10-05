@@ -12,8 +12,8 @@ import (
 
 	"golang.org/x/text/unicode/norm"
 
-	"geektrust/internal/config"
-	"geektrust/internal/privatefile"
+	"github.com/ShanghaitechGeekPie/geektrust/internal/config"
+	"github.com/ShanghaitechGeekPie/geektrust/internal/privatefile"
 )
 
 const passkeyToolSource = "git+https://github.com/vvbbnn00/shanghaitech-ids-passkey.git"

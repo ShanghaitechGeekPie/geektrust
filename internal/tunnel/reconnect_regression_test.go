@@ -18,7 +18,7 @@ import (
 	"testing"
 	"time"
 
-	"geektrust/internal/session"
+	"github.com/ShanghaitechGeekPie/geektrust/internal/session"
 )
 
 type reconnectTestProvider struct {
