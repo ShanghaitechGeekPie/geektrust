@@ -40,6 +40,32 @@ func (f identityFunc) Info(context.Context) (auth.IdentityInfo, error) {
 func (f identityFunc) Authenticate(c context.Context, h *http.Client, r auth.IdentityRequest) error {
 	return f(c, h, r)
 }
+
+func TestCustomDefaultHTTPTransportCanRestoreSession(t *testing.T) {
+	previous := http.DefaultTransport
+	http.DefaultTransport = fixtureTransport{}
+	defer func() { http.DefaultTransport = previous }()
+	opts := contractOptions(&contractIdentity{subject: "account"}, &contractStore{state: validState()})
+	opts.Network.ControlTransport = nil
+	c, err := New(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if _, err := c.Connect(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestOptionsRejectIPv6TunnelDNS(t *testing.T) {
+	opts := contractOptions(&contractIdentity{subject: "account"}, &contractStore{})
+	opts.DNS.Servers = []netip.Addr{netip.MustParseAddr("2001:db8::53")}
+	if c, err := New(opts); err == nil {
+		c.Close()
+		t.Fatal("IPv6-only tunnel DNS accepted by the IPv4 data plane")
+	}
+}
+
 func TestOptionsCopiedAndProfileDefaults(t *testing.T) {
 	s := validState()
 	s.LoginDomain = "custom-domain"

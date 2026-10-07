@@ -192,12 +192,16 @@ func (c *Config) validate() error {
 		if err != nil {
 			return fmt.Errorf("gateway %q: %w", gw, err)
 		}
+		n, err := strconv.Atoi(port)
+		if err != nil || n < 1 || n > 65535 || host == "" || strings.ContainsAny(host, "/\\@?# \t\r\n") {
+			return fmt.Errorf("gateway %q must be a valid host:port", gw)
+		}
 		// Normalize so downstream dialers always get host:port.
-		c.Gateways[i] = net.JoinHostPort(host, port)
+		c.Gateways[i] = net.JoinHostPort(host, strconv.Itoa(n))
 	}
 	for _, d := range c.DNS {
-		if net.ParseIP(d) == nil {
-			return fmt.Errorf("dns entry %q is not an IP address", d)
+		if net.ParseIP(d).To4() == nil {
+			return fmt.Errorf("dns entry %q must be an IPv4 address", d)
 		}
 	}
 	for name, l := range map[string]Listener{"inbound.socks5": c.Inbound.SOCKS5, "inbound.http": c.Inbound.HTTP} {

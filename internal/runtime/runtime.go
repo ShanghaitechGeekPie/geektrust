@@ -147,10 +147,10 @@ func New(opts Options) (*Runtime, error) {
 	if opts.DNS.Servers != nil {
 		cfg.DNS = make([]string, len(opts.DNS.Servers))
 		for i, x := range opts.DNS.Servers {
-			if !x.IsValid() {
-				return nil, errors.New("invalid DNS address")
+			if !x.Unmap().Is4() {
+				return nil, errors.New("tunnel DNS requires an IPv4 address")
 			}
-			cfg.DNS[i] = x.String()
+			cfg.DNS[i] = x.Unmap().String()
 		}
 	}
 	mapDomains := resolved.Profile == compatibility.ShanghaiTech
@@ -160,11 +160,14 @@ func New(opts Options) (*Runtime, error) {
 	p.Transport = opts.Network.ControlTransport
 	var owned *http.Transport
 	if p.Transport == nil {
-		owned = http.DefaultTransport.(*http.Transport).Clone()
-		if opts.Network.DialContext != nil {
-			owned.DialContext = opts.Network.DialContext
+		p.Transport = http.DefaultTransport
+		if transport, ok := http.DefaultTransport.(*http.Transport); ok {
+			owned = transport.Clone()
+			if opts.Network.DialContext != nil {
+				owned.DialContext = opts.Network.DialContext
+			}
+			p.Transport = owned
 		}
-		p.Transport = owned
 	}
 	p.HTTPTimeout = opts.Network.HTTPTimeout
 	m := tunnel.NewManager(p, opts.Logger)
