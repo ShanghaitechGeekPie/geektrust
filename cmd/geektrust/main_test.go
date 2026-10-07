@@ -156,7 +156,7 @@ func TestValidateInitPaths(t *testing.T) {
 		Keystore:  filepath.Join(dir, "synthetic.keystore"),
 		StateFile: filepath.Join(dir, "synthetic-state.enc"),
 	}
-	if _, err := validateInitPaths(filepath.Join(dir, "config.toml"), safe); err != nil {
+	if _, err := validatePrivatePaths(filepath.Join(dir, "config.toml"), safe); err != nil {
 		t.Fatalf("safe paths rejected: %v", err)
 	}
 
@@ -199,7 +199,7 @@ func TestValidateInitPaths(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := validateInitPaths(tt.configPath, &config.Config{
+			_, err := validatePrivatePaths(tt.configPath, &config.Config{
 				Keystore:  tt.keystore,
 				StateFile: tt.stateFile,
 			})
@@ -218,7 +218,7 @@ func TestValidateInitPaths(t *testing.T) {
 		if err := os.Link(first, second); err != nil {
 			t.Fatal(err)
 		}
-		_, err := validateInitPaths(first, &config.Config{
+		_, err := validatePrivatePaths(first, &config.Config{
 			Keystore:  second,
 			StateFile: filepath.Join(dir, "hardlink-state"),
 		})
@@ -244,7 +244,7 @@ func TestValidateInitPaths(t *testing.T) {
 			}
 		}
 		defer os.Remove(linkDir)
-		_, err := validateInitPaths(
+		_, err := validatePrivatePaths(
 			filepath.Join(linkDir, "future"),
 			&config.Config{
 				Keystore:  filepath.Join(realDir, "future"),
@@ -271,7 +271,7 @@ func TestValidateInitPaths(t *testing.T) {
 		if err := os.Mkdir(privateChild, 0o700); err != nil {
 			t.Fatal(err)
 		}
-		_, err := validateInitPaths(
+		_, err := validatePrivatePaths(
 			filepath.Join(privateChild, "config.toml"),
 			&config.Config{
 				Keystore:  filepath.Join(dir, "sticky-key"),
@@ -288,7 +288,7 @@ func TestValidateInitPaths(t *testing.T) {
 		if err := os.Mkdir(stateDir, 0o700); err != nil {
 			t.Fatal(err)
 		}
-		_, err := validateInitPaths(
+		_, err := validatePrivatePaths(
 			filepath.Join(dir, "state-directory-config"),
 			&config.Config{
 				Keystore:  filepath.Join(dir, "state-directory-key"),

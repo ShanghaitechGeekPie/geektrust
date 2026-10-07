@@ -22,26 +22,23 @@ type initPath struct {
 	path string
 }
 
-func validateInitPaths(configPath string, cfg *config.Config) (string, error) {
+func validatePrivatePaths(configPath string, cfg *config.Config) (string, error) {
 	paths := []initPath{
 		{name: "config", path: configPath},
 		{name: "keystore", path: cfg.Keystore},
 		{name: "state_file", path: cfg.StateFile},
 		{name: "state key", path: cfg.StateFile + ".key"},
 	}
+	if cfg.Directory != "" {
+		paths = append(paths, initPath{name: "device identity", path: filepath.Join(cfg.Directory, "device_id")})
+	}
 	resolved := make([]string, len(paths))
-	lexical := make([]string, len(paths))
 	infos := make([]os.FileInfo, len(paths))
 	for i, item := range paths {
 		if item.path == "" {
 			return "", fmt.Errorf("%s path is required", item.name)
 		}
 
-		var err error
-		lexical[i], err = filepath.Abs(filepath.Clean(item.path))
-		if err != nil {
-			return "", fmt.Errorf("resolve lexical %s path: %w", item.name, err)
-		}
 		var infoErr error
 		resolved[i], infos[i], infoErr = resolveInitPath(item.path)
 		if infoErr != nil {
@@ -224,7 +221,7 @@ func cmdInit(ctx context.Context, configPath string, args []string) error {
 	if err != nil {
 		return err
 	}
-	resolvedConfigPath, err := validateInitPaths(configPath, prepared)
+	resolvedConfigPath, err := validatePrivatePaths(configPath, prepared)
 	if err != nil {
 		return err
 	}
@@ -259,7 +256,7 @@ func cmdInit(ctx context.Context, configPath string, args []string) error {
 	}
 	// The binder may have created a symlink or hard link. Re-evaluate path
 	// identity before writing the config.
-	resolvedConfigPath, err = validateInitPaths(configPath, prepared)
+	resolvedConfigPath, err = validatePrivatePaths(configPath, prepared)
 	if err != nil {
 		return err
 	}

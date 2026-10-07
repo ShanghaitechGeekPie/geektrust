@@ -23,6 +23,9 @@ func cmdConfig(path string, args []string) error {
 			return e
 		}
 		if args[0] == "check" {
+			if _, e := validatePrivatePaths(path, c); e != nil {
+				return e
+			}
 			if e = c.ValidateListeners(); e != nil {
 				return e
 			}

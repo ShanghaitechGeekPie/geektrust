@@ -84,6 +84,10 @@ func main() {
 		fmt.Fprintln(os.Stderr, "geektrust:", err)
 		os.Exit(1)
 	}
+	if _, err := validatePrivatePaths(configPath, cfg); err != nil {
+		fmt.Fprintln(os.Stderr, "geektrust:", err)
+		os.Exit(1)
+	}
 	if cfg.Version == 1 {
 		fmt.Fprintf(os.Stderr, "Warning: using a deprecated config (version 1). Run geektrust -config %q config migrate to preview the new format, then add --write to migrate.\n", configPath)
 	}
