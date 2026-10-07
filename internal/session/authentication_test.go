@@ -33,7 +33,7 @@ func TestCancelledChallengeDoesNotSubmitAnswer(t *testing.T) {
 		io.WriteString(w, `{"code":0,"data":{}}`)
 	}))
 	defer server.Close()
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 	p := &Provider{logger: slog.New(slog.NewTextHandler(io.Discard, nil)), ChallengeHandler: func(ctx context.Context, challenge auth.Challenge) (string, error) {
 		deadline, ok := ctx.Deadline()

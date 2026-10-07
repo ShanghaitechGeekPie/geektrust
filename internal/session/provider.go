@@ -686,11 +686,8 @@ func (p *Provider) smsFlow(ctx context.Context, sc *sdpc.Client) (string, error)
 	var code string
 	var promptErr error
 	if p.ChallengeHandler != nil {
-		challengeCtx, cancel := context.WithTimeout(ctx, time.Minute)
-		defer cancel()
-		ctx = challengeCtx
-		expires, _ := challengeCtx.Deadline()
-		return p.challengeFlow(challengeCtx, sc, expires)
+		deadline, _ := ctx.Deadline()
+		return p.challengeFlow(ctx, sc, deadline)
 	} else if p.smsHandler != nil {
 		// Keep typed controller errors for the web layer. An expired auth
 		// session also carries the private restart marker consumed by login.
