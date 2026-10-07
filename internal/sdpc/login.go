@@ -9,6 +9,7 @@ import (
 	"net/url"
 
 	"github.com/ShanghaitechGeekPie/geektrust/auth"
+	"github.com/ShanghaitechGeekPie/geektrust/internal/httporigin"
 )
 
 // CasTicket runs the CAS redirect chain:
@@ -50,12 +51,12 @@ func (c *Client) CasTicket(ctx context.Context) (string, error) {
 		if base.Scheme == "https" && r.URL.Scheme != "https" {
 			return errors.New("cas chain: insecure redirect")
 		}
-		if r.URL.Host == base.Host && r.URL.Scheme == base.Scheme && r.URL.Path == "/portal/shortcut.html" {
+		if httporigin.Same(r.URL, base) && r.URL.Path == "/portal/shortcut.html" {
 			shortcutURL = r.URL
 			return http.ErrUseLastResponse
 		}
 		// Never leak the controller CSRF token to the IDS hop.
-		if r.URL.Host != base.Host {
+		if !httporigin.Same(r.URL, base) {
 			r.Header.Del("x-csrf-token")
 		}
 		if len(via) >= 10 {
@@ -83,7 +84,7 @@ func (c *Client) CasTicket(ctx context.Context) (string, error) {
 
 	if shortcutURL == nil {
 		// Some controllers serve shortcut.html directly as the final 200.
-		if resp.StatusCode == http.StatusOK && resp.Request != nil && resp.Request.URL.Host == base.Host && resp.Request.URL.Scheme == base.Scheme && resp.Request.URL.Path == "/portal/shortcut.html" {
+		if resp.StatusCode == http.StatusOK && resp.Request != nil && httporigin.Same(resp.Request.URL, base) && resp.Request.URL.Path == "/portal/shortcut.html" {
 			shortcutURL = resp.Request.URL
 		}
 	}

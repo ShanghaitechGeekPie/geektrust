@@ -17,6 +17,8 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+
+	"github.com/ShanghaitechGeekPie/geektrust/internal/httporigin"
 )
 
 // ClientTypeBrowser is the unsigned browser client path.
@@ -185,7 +187,7 @@ func (c *Client) doJSONWithType(ctx context.Context, method, path, clientType st
 	hc := *c.HTTP
 	checkRedirect := hc.CheckRedirect
 	hc.CheckRedirect = func(r *http.Request, via []*http.Request) error {
-		if r.URL.Scheme != req.URL.Scheme || r.URL.Host != req.URL.Host {
+		if !httporigin.Same(r.URL, req.URL) {
 			return errors.New("controller redirect outside origin")
 		}
 		if checkRedirect != nil {

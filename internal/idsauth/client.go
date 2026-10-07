@@ -5,6 +5,8 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+
+	"github.com/ShanghaitechGeekPie/geektrust/internal/httporigin"
 )
 
 // DefaultUserAgent matches the Python library's default browser UA.
@@ -62,7 +64,7 @@ func (c *Client) do(req *http.Request) (*http.Response, error) {
 		// A successful login may navigate to another service. Return that
 		// response and confirm the identity session separately; never forward
 		// assertion data or fetch challenges outside the credential origin.
-		if r.URL.Scheme != req.URL.Scheme || r.URL.Host != req.URL.Host {
+		if !httporigin.Same(r.URL, req.URL) {
 			return http.ErrUseLastResponse
 		}
 		if checkRedirect != nil {

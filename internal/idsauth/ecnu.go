@@ -18,6 +18,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/ShanghaitechGeekPie/geektrust/internal/httporigin"
 	"golang.org/x/net/html"
 )
 
@@ -164,7 +165,7 @@ func (c *ecnuClient) request(ctx context.Context, method, target, content string
 		if len(via) >= 10 {
 			return errors.New("SSO redirect limit")
 		}
-		if r.URL.Scheme != origin.Scheme || r.URL.Host != origin.Host {
+		if !httporigin.Same(r.URL, origin) {
 			return http.ErrUseLastResponse
 		}
 		return nil
