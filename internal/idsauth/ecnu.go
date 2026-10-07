@@ -262,7 +262,7 @@ func (c *ecnuClient) Login(ctx context.Context) error {
 	}
 	c.Keystore.SetSignCount(count)
 	if err = c.Keystore.Save(); err != nil {
-		return errors.New("cannot persist passkey counter")
+		return fmt.Errorf("cannot persist passkey counter: %w", err)
 	}
 	token := request["sessionToken"]
 	if token == nil {

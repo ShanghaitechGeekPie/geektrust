@@ -38,6 +38,7 @@ func TestECNUFlow(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			persisted, submitted := false, false
+			storageErr := errors.New("storage unavailable")
 			var origin string
 			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch r.URL.Path {
@@ -99,7 +100,7 @@ func TestECNUFlow(t *testing.T) {
 			blob = append(append([]byte{}, ecnuMagic...), blob[len(keystoreMagic):]...)
 			store, err := ParseKeystore(blob, func(b []byte) error {
 				if tc.failSave {
-					return errors.New("storage unavailable")
+					return storageErr
 				}
 				k, e := ParseKeystore(b, nil)
 				if e != nil {
@@ -119,6 +120,9 @@ func TestECNUFlow(t *testing.T) {
 			if tc.failSave {
 				if err == nil || submitted {
 					t.Fatal("failed persistence did not stop authentication")
+				}
+				if !errors.Is(err, storageErr) {
+					t.Fatalf("persistence error identity was lost: %v", err)
 				}
 			} else if err != nil || !submitted {
 				t.Fatalf("login failed: %v", err)
