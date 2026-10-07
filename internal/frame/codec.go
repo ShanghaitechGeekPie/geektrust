@@ -311,7 +311,7 @@ func ReadTunnelAuthReply(r *bufio.Reader) (*TunnelAuthReply, error) {
 		return nil, err
 	}
 	var resp struct {
-		Code    int64  `json:"code"`
+		Code    *int64 `json:"code"`
 		Message string `json:"message"`
 		Data    struct {
 			DeviceID string `json:"deviceID"`
@@ -320,8 +320,11 @@ func ReadTunnelAuthReply(r *bufio.Reader) (*TunnelAuthReply, error) {
 	if err := json.Unmarshal(payload, &resp); err != nil {
 		return nil, fmt.Errorf("tunnel auth: decode response: %w", err)
 	}
-	if resp.Code != 0 {
-		return nil, &TunnelAuthError{Code: resp.Code, Message: resp.Message}
+	if resp.Code == nil {
+		return nil, fmt.Errorf("tunnel auth: response missing code")
+	}
+	if *resp.Code != 0 {
+		return nil, &TunnelAuthError{Code: *resp.Code, Message: resp.Message}
 	}
 
 	vipHead, err := readFull(r, 4)

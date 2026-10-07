@@ -369,14 +369,17 @@ func parseTCPProtocolResponse(body []byte) error {
 		return nil
 	}
 	var response struct {
-		Code    int64  `json:"code"`
+		Code    *int64 `json:"code"`
 		Message string `json:"message"`
 	}
 	if err := json.Unmarshal(body, &response); err != nil {
 		return fmt.Errorf("decode direct TCP protocol response: %w", err)
 	}
-	if response.Code != 0 {
-		return &TCPAuthError{Code: response.Code}
+	if response.Code == nil {
+		return errors.New("direct TCP protocol response missing code")
+	}
+	if *response.Code != 0 {
+		return &TCPAuthError{Code: *response.Code}
 	}
 	return nil
 }

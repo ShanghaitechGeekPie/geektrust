@@ -253,7 +253,7 @@ func (c *ecnuClient) Login(ctx context.Context) error {
 		return errors.New("invalid SSO finish URL")
 	}
 	target := base.ResolveReference(ref)
-	if target.Scheme != base.Scheme || target.Host != base.Host || target.User != nil || target.Fragment != "" {
+	if !httporigin.Same(target, base) || target.Fragment != "" {
 		return errors.New("SSO finish URL outside credential origin")
 	}
 	assertion, count, err := buildAssertion(options, c.Keystore, c.Origin)

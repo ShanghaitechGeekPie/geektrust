@@ -162,6 +162,15 @@ func gatewayTLSConfigWithTrust(ctx context.Context, addr string, template *tls.C
 			return verifyErr
 		}
 		leaf := cs.PeerCertificates[0]
+		if verifyErr != nil {
+			// The pin replaces CA trust, not the certificate's server usage or
+			// chain constraints. Check those against the supplied chain anchor.
+			fallbackRoots := x509.NewCertPool()
+			fallbackRoots.AddCert(cs.PeerCertificates[len(cs.PeerCertificates)-1])
+			if _, err := leaf.Verify(x509.VerifyOptions{DNSName: cfg.ServerName, Roots: fallbackRoots, Intermediates: intermediates, CurrentTime: now}); err != nil {
+				return err
+			}
+		}
 		// Controllers may advertise gateway IPs whose private-CA certificates
 		// contain DNS names only. The saved key is bound to the advertised IP:port.
 		if cfg.ServerName != "" {
@@ -544,7 +553,7 @@ func (t *Tunnel) readLoop() {
 
 func (t *Tunnel) handleAuthResponse(payload []byte) {
 	var parsed struct {
-		Code    int64  `json:"code"`
+		Code    *int64 `json:"code"`
 		Message string `json:"message"`
 		Data    struct {
 			ConnectToken  string `json:"connectToken"`
@@ -556,12 +565,16 @@ func (t *Tunnel) handleAuthResponse(payload []byte) {
 		t.logger.Warn("tunnel: bad auth response", "err", err)
 		return
 	}
+	if parsed.Code == nil {
+		t.logger.Warn("tunnel: auth response missing code")
+		return
+	}
 	token := parsed.Data.ConnectToken
 	if token == "" {
 		token = parsed.Data.Token
 	}
 	resp := authResult{resp: AuthResponse{
-		Code:         parsed.Code,
+		Code:         *parsed.Code,
 		Message:      parsed.Message,
 		ConnectToken: token,
 	}}
@@ -576,7 +589,7 @@ func (t *Tunnel) handleAuthResponse(payload []byte) {
 	t.pendingMu.Unlock()
 	if !ok {
 		t.logger.Debug("tunnel: auth response without pending request",
-			"conntrack", parsed.Data.ConntrackHash, "code", parsed.Code)
+			"conntrack", parsed.Data.ConntrackHash, "code", *parsed.Code)
 		return
 	}
 	ch <- resp // buffered slot, requester has not received yet: never blocks

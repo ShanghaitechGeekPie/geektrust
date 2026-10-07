@@ -239,10 +239,3 @@ func parseEnvelopeInto(raw []byte, op string, out any) error {
 	}
 	return nil
 }
-
-func truncate(b []byte, n int) string {
-	if len(b) > n {
-		b = b[:n]
-	}
-	return string(b)
-}
