@@ -1,13 +1,12 @@
 module github.com/ShanghaitechGeekPie/geektrust
 
-go 1.24.13
+go 1.26.8
 
 require (
 	github.com/BurntSushi/toml v1.5.0
 	github.com/metacubex/gvisor v0.0.0-20251227095601-261ec1326fe8
-	golang.org/x/net v0.43.0
-	golang.org/x/sys v0.35.0
-	golang.org/x/text v0.28.0
+	golang.org/x/net v0.56.0
+	golang.org/x/sys v0.46.0
 )
 
 require (
