@@ -19,9 +19,7 @@ func (c *Credential) GatewaysForGroup(group string) []string {
 			assigned = c.Policy.Gateways
 		}
 		if len(assigned) == 0 {
-			if !c.GatewayOverride {
-				assigned = c.Gateways
-			}
+			assigned = c.Gateways
 		}
 	}
 	if c.GatewayOverride {
