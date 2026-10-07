@@ -1,4 +1,4 @@
-package deployment
+package compatibility
 
 import (
 	"fmt"
@@ -45,7 +45,7 @@ func (o Options) Validate() error {
 	switch o.Profile {
 	case Auto, Generic, ShanghaiTech, ECNU:
 	default:
-		return fmt.Errorf("unknown deployment profile %q", o.Profile)
+		return fmt.Errorf("unknown compatibility profile %q", o.Profile)
 	}
 	if len(o.Protocol.ControllerPlatform) > 64 || strings.IndexFunc(o.Protocol.ControllerPlatform, unicode.IsControl) >= 0 {
 		return fmt.Errorf("invalid controller platform")

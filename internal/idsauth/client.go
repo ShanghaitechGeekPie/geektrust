@@ -2,6 +2,7 @@ package idsauth
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 )
@@ -55,7 +56,24 @@ func (c *Client) IsLoggedIn(ctx context.Context) (bool, error) { return c.backen
 
 func (c *Client) do(req *http.Request) (*http.Response, error) {
 	c.setHeaders(req)
-	return c.HTTP.Do(req)
+	hc := *c.HTTP
+	checkRedirect := hc.CheckRedirect
+	hc.CheckRedirect = func(r *http.Request, via []*http.Request) error {
+		// A successful login may navigate to another service. Return that
+		// response and confirm the identity session separately; never forward
+		// assertion data or fetch challenges outside the credential origin.
+		if r.URL.Scheme != req.URL.Scheme || r.URL.Host != req.URL.Host {
+			return http.ErrUseLastResponse
+		}
+		if checkRedirect != nil {
+			return checkRedirect(r, via)
+		}
+		if len(via) >= 10 {
+			return errors.New("identity redirect limit")
+		}
+		return nil
+	}
+	return hc.Do(req)
 }
 
 // doNoRedirect performs a request without following redirects, regardless of

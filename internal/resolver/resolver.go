@@ -41,7 +41,6 @@ type Resolver struct {
 	tunnel           TunnelDialer
 	stages           []lookupStage // direct public resolvers, then the system resolver
 	tunnelDNS        *dnsPool
-	controllerFirst  bool
 	disableTunnelDNS bool
 	fallback         func(context.Context, string) ([]netip.Addr, error)
 }
@@ -183,6 +182,7 @@ func (r *Resolver) lookupIPv4(ctx context.Context, host string, cred *session.Cr
 		}
 	}
 	if r.tunnel != nil && !r.disableTunnelDNS && len(cred.DNS) > 0 {
+		ctx = session.ExpectGeneration(ctx, cred.Generation)
 		scope := r.tunnelDNSScope(cred)
 		result, lookupErr := r.tunnelDNS.lookup(ctx, host, scope, cred.DNS, func(ctx context.Context, network, address string) (net.Conn, error) {
 			server, _, err := net.SplitHostPort(address)
@@ -220,7 +220,7 @@ func (r *Resolver) lookupIPv4(ctx context.Context, host string, cred *session.Cr
 			return nil, err
 		}
 		for _, ip := range answers {
-			if ip.Is4() {
+			if ip.Is4() && !IsFakeIP(net.IP(ip.AsSlice())) {
 				return net.IP(ip.AsSlice()), nil
 			}
 		}
@@ -319,5 +319,5 @@ func (r *Resolver) LookupHost(ctx context.Context, host string) ([]string, error
 
 // NewController uses only controller DNS, with an explicit host fallback.
 func NewController(p session.CredentialProvider, t TunnelDialer, f func(context.Context, string) ([]netip.Addr, error), disabled bool) *Resolver {
-	return &Resolver{provider: p, tunnel: t, tunnelDNS: newDNSPool(), controllerFirst: true, disableTunnelDNS: disabled, fallback: f}
+	return &Resolver{provider: p, tunnel: t, tunnelDNS: newDNSPool(), disableTunnelDNS: disabled, fallback: f}
 }

@@ -10,7 +10,7 @@ import (
 func TestV2MinimalAndReadOnly(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "config.toml")
-	data := "config_version = 2\n[controller]\ndeployment='auto'\n[auth.passkey]\nkeystore = './credential'\n[storage]\ndirectory = './private'\n"
+	data := "config_version = 2\n[controller]\ncompatibility='auto'\n[auth.passkey]\nkeystore = './credential'\n[storage]\ndirectory = './private'\n"
 	if e := os.WriteFile(p, []byte(data), 0600); e != nil {
 		t.Fatal(e)
 	}
@@ -79,21 +79,21 @@ func TestV2StrictAndLegacyMigration(t *testing.T) {
 	}
 }
 
-func TestV2StateFileAliasAndConflicts(t *testing.T) {
+func TestV2StateFileRejectsRemovedName(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "config.toml")
 	base := "config_version = 2\n[auth.passkey]\nkeystore = './credential'\n[storage]\ndirectory = './private'\n"
 	cases := []struct {
 		name, storage, want string
-		conflict            bool
+		rejected            bool
 	}{
 		{"default", "", filepath.Join(dir, "private", "session.enc"), false},
 		{"new path", "state_file = './current.enc'\n", filepath.Join(dir, "current.enc"), false},
-		{"legacy path", "legacy_state = './previous.enc'\n", filepath.Join(dir, "previous.enc"), false},
+		{"removed name", "legacy_state = './previous.enc'\n", "", true},
 		{"empty new path", "state_file = ''\n", filepath.Join(dir, "private", "session.enc"), false},
-		{"equivalent aliases", "state_file = './cache.enc'\nlegacy_state = 'nested/../cache.enc'\n", filepath.Join(dir, "cache.enc"), false},
-		{"conflicting aliases", "state_file = './new.enc'\nlegacy_state = './old.enc'\n", "", true},
-		{"explicit empty conflicts", "state_file = './new.enc'\nlegacy_state = ''\n", "", true},
+
+		{"removed name beside current name", "state_file = './new.enc'\nlegacy_state = './old.enc'\n", "", true},
+		{"empty removed name", "state_file = './new.enc'\nlegacy_state = ''\n", "", true},
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
@@ -102,9 +102,9 @@ func TestV2StateFileAliasAndConflicts(t *testing.T) {
 				t.Fatal(err)
 			}
 			cfg, err := Load(p)
-			if tt.conflict {
-				if err == nil || !strings.Contains(err.Error(), "conflicting storage.state_file") {
-					t.Fatalf("expected conflict, got %v", err)
+			if tt.rejected {
+				if err == nil || !strings.Contains(err.Error(), "unknown configuration field storage.legacy_state") {
+					t.Fatalf("expected removed-field rejection, got %v", err)
 				}
 			} else {
 				if err != nil {
@@ -123,6 +123,31 @@ func TestV2StateFileAliasAndConflicts(t *testing.T) {
 			}
 			if string(after) != original {
 				t.Fatal("loading rewrote source configuration")
+			}
+		})
+	}
+}
+
+func TestV2ControllerCompatibilityName(t *testing.T) {
+	for _, field := range []string{"compatibility", "deployment"} {
+		t.Run(field, func(t *testing.T) {
+			p := filepath.Join(t.TempDir(), "config.toml")
+			data := "config_version=2\n[controller]\n" + field + "='generic'\n[auth.passkey]\nkeystore='credential'\n"
+			if err := os.WriteFile(p, []byte(data), 0600); err != nil {
+				t.Fatal(err)
+			}
+			c, err := Load(p)
+			if field == "deployment" {
+				if err == nil {
+					t.Fatal("removed controller.deployment accepted")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(c.Compatibility) != "generic" {
+				t.Fatalf("compatibility = %q", c.Compatibility)
 			}
 		})
 	}

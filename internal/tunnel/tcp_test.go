@@ -13,9 +13,9 @@ import (
 	"syscall"
 	"testing"
 
+	"github.com/ShanghaitechGeekPie/geektrust/compatibility"
 	"github.com/ShanghaitechGeekPie/geektrust/internal/sdpc"
 	"github.com/ShanghaitechGeekPie/geektrust/internal/session"
-	"github.com/ShanghaitechGeekPie/geektrust/internal/settings"
 )
 
 func TestBuildTCPRequestCombinesAuthAndDestination(t *testing.T) {
@@ -226,7 +226,7 @@ func TestTCPAuthenticationDenialNeverFallsBack(t *testing.T) {
 }
 
 func TestTCPConfiguredProcessIdentity(t *testing.T) {
-	identity := &settings.ProcessIdentity{Name: "custom-client", Platform: "Windows", Path: "custom-client.exe"}
+	identity := &compatibility.ProcessMetadata{Name: "custom-client", Platform: "Windows", Path: "custom-client.exe"}
 	packet, err := buildTCPRequest(&session.Credential{ProcessIdentity: identity}, "192.0.2.1", 22, "app", "")
 	if err != nil {
 		t.Fatal(err)

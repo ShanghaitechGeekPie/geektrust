@@ -6,7 +6,7 @@ import (
 	"crypto/x509"
 	"errors"
 	"github.com/ShanghaitechGeekPie/geektrust/auth"
-	"github.com/ShanghaitechGeekPie/geektrust/deployment"
+	"github.com/ShanghaitechGeekPie/geektrust/compatibility"
 	"github.com/ShanghaitechGeekPie/geektrust/internal/config"
 	"github.com/ShanghaitechGeekPie/geektrust/internal/runtime"
 	"github.com/ShanghaitechGeekPie/geektrust/internal/session"
@@ -33,18 +33,12 @@ func commandClient(cfg *config.Config, logger *slog.Logger) (*runtime.Runtime, e
 			return "", auth.ErrUnsupported
 		}
 		return smsPrompt(ctx)
-	}}, Deployment: deployment.Options{Profile: cfg.Deployment, Protocol: deployment.ProtocolOptions{ControllerPlatform: cfg.Platform}, Fallbacks: &deployment.Fallbacks{ApplicationID: cfg.Compatibility.FallbackAppID, Gateways: cfg.Compatibility.FallbackGateways, MissingGatewayGroup: cfg.Compatibility.MissingGatewayGroupFallback, StreamToL3: cfg.Compatibility.TCPToL3Fallback}}, SessionStore: commandSessionStore{session.NewStore(cfg.StateFile)}}
-	if cfg.Version == 1 && cfg.CompatibilityExplicit {
-		o.Deployment.Profile = deployment.Generic
-	}
+	}}, Compatibility: compatibility.Options{Profile: cfg.Compatibility, Protocol: compatibility.ProtocolOptions{ControllerPlatform: cfg.Platform}, Fallbacks: &cfg.Fallbacks}, SessionStore: commandSessionStore{session.NewStore(cfg.StateFile)}}
 	if cfg.ClientType == "client" {
 		o.Auth.Mode = runtime.DesktopMode
 	}
-	if p := cfg.Compatibility.ProcessIdentity; p != nil {
-		o.Deployment.Protocol.Process = &deployment.ProcessMetadata{Name: p.Name, Platform: p.Platform, Path: p.Path}
-	}
-	if cfg.Compatibility.GatewayServerName != "" {
-		o.Network.GatewayTLS.Config = &tls.Config{ServerName: cfg.Compatibility.GatewayServerName}
+	if cfg.GatewayTLSName != "" {
+		o.Network.GatewayTLS.Config = &tls.Config{ServerName: cfg.GatewayTLSName}
 	}
 	if cfg.CAFile != "" {
 		b, e := os.ReadFile(cfg.CAFile)

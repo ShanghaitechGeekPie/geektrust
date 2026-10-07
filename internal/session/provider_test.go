@@ -81,10 +81,11 @@ func TestRestoreSkipsDifferentClientType(t *testing.T) {
 			store := NewStore(statePath)
 			const deviceID = "0123456789ABCDEF0123456789ABCDEF"
 			if err := store.Save(context.Background(), &State{
-				SID:        "synthetic-session",
-				DeviceID:   deviceID,
-				Cookies:    []CookieRecord{{Name: "sid", Value: "synthetic-session"}},
-				ClientType: tt.stateType,
+				ControllerURL: "http://127.0.0.1:1",
+				SID:           "synthetic-session",
+				DeviceID:      deviceID,
+				Cookies:       []CookieRecord{{Name: "sid", Value: "synthetic-session"}},
+				ClientType:    tt.stateType,
 			}); err != nil {
 				t.Fatal(err)
 			}

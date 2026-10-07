@@ -28,7 +28,7 @@ defer conn.Close()
 
 `New` 只检查和复制设置。`Connect`、`Authenticate` 可以发起短信交互；后台、数据连接和解析遇到短信要求时返回 `auth.ErrInteractionRequired`。挑战区分本地 `Deadline` 和服务端 `ServerExpiresAt`，提供限生命周期的 `Resend`。不提供完整控制器登录替换钩子。
 
-部署默认为 `deployment.Auto`。上科大的已验证 TLS 身份和缺字段补充由内部适配提供；未知控制器采用 `Generic`。`Fallbacks=nil` 使用部署默认，`&deployment.Fallbacks{}` 关闭全部兜底。TLS 设置放在 `Network.GatewayTLS`，正常 CA 验证成功时不强制检查 pin；未知 CA 的兜底需要原子的 `CheckOrEnroll`，并继续验证证书身份和有效期。
+控制器兼容适配默认为 `compatibility.Auto`。上科大的已验证 TLS 身份和缺字段补充由内部适配提供；未知控制器采用 `Generic`。`Fallbacks=nil` 使用适配默认，`&compatibility.Fallbacks{}` 关闭全部兜底。TLS 设置放在 `Network.GatewayTLS`，正常 CA 验证成功时不强制检查 pin；未知 CA 的兜底需要原子的 `CheckOrEnroll`，并继续验证证书身份和有效期。
 
 SDK 默认仅使用控制器 DNS；额外来源由 `DNS.FallbackLookup` 明确提供。CLI 的 `auto` 顺序在命令转换层保留。`Network.AllowedGateways=nil` 不额外限制，显式空列表拒绝全部线路。`CheckTarget` 收到地址、协议、端口和代；`DNSQueryTarget` 区分基础 DNS 查询，只能收紧访问权限。
 

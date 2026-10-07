@@ -5,8 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"github.com/BurntSushi/toml"
-	public "github.com/ShanghaitechGeekPie/geektrust/deployment"
-	defaults "github.com/ShanghaitechGeekPie/geektrust/internal/deployment"
+	public "github.com/ShanghaitechGeekPie/geektrust/compatibility"
+	defaults "github.com/ShanghaitechGeekPie/geektrust/internal/compatibility"
 	"github.com/ShanghaitechGeekPie/geektrust/internal/storage"
 	"net"
 	"net/url"
@@ -21,9 +21,9 @@ import (
 type FileV2 struct {
 	Version    int `toml:"config_version"`
 	Controller struct {
-		URL        string `toml:"url"`
-		Deployment string `toml:"deployment"`
-		Platform   string `toml:"platform"`
+		URL           string `toml:"url"`
+		Compatibility string `toml:"compatibility"`
+		Platform      string `toml:"platform"`
 	} `toml:"controller"`
 	Auth struct {
 		Mode        string `toml:"mode"`
@@ -51,8 +51,6 @@ type FileV2 struct {
 	Storage struct {
 		Directory string `toml:"directory"`
 		StateFile string `toml:"state_file"`
-		// LegacyState is a read-compatible alias; new output uses state_file.
-		LegacyState string `toml:"legacy_state,omitempty"`
 	} `toml:"storage"`
 	Logging struct {
 		Level string `toml:"level"`
@@ -100,11 +98,11 @@ func loadV2(path string, data []byte) (*Config, error) {
 		f.Controller.URL = DefaultBaseURL
 	}
 	u, e := url.Parse(f.Controller.URL)
-	if e != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
+	if e != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.ForceQuery || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
 		return nil, errors.New("controller.url must be an HTTPS origin")
 	}
-	profile := public.Profile(f.Controller.Deployment)
-	if f.Controller.Deployment == "auto" {
+	profile := public.Profile(f.Controller.Compatibility)
+	if f.Controller.Compatibility == "auto" {
 		profile = public.Auto
 	}
 	if e := (public.Options{Profile: profile}).Validate(); e != nil {
@@ -144,7 +142,7 @@ func loadV2(path string, data []byte) (*Config, error) {
 			return nil, e
 		}
 	}
-	cfg := &Config{Version: 2, SourcePath: path, Directory: directory, DeviceID: id, Keystore: resolve(f.Auth.Passkey.Keystore), BaseURL: strings.TrimRight(f.Controller.URL, "/"), Platform: v.Platform, Deployment: profile, ClientType: mode, LoginDomain: f.Auth.LoginDomain, Compatibility: v.Compatibility, StateFile: filepath.Join(directory, "session.enc"), DNS: append([]string(nil), f.DNS.Servers...), DNSStrategy: f.DNS.Strategy, LogLevel: f.Logging.Level}
+	cfg := &Config{Version: 2, Directory: directory, DeviceID: id, Keystore: resolve(f.Auth.Passkey.Keystore), BaseURL: strings.TrimRight(f.Controller.URL, "/"), Platform: v.Platform, Compatibility: profile, ClientType: mode, LoginDomain: f.Auth.LoginDomain, Fallbacks: v.Fallbacks, GatewayTLSName: v.GatewayServerName, StateFile: filepath.Join(directory, "session.enc"), DNS: append([]string(nil), f.DNS.Servers...), DNSStrategy: f.DNS.Strategy, LogLevel: f.Logging.Level}
 	if cfg.DNSStrategy == "" {
 		cfg.DNSStrategy = "auto"
 	}
@@ -154,22 +152,15 @@ func loadV2(path string, data []byte) (*Config, error) {
 	if cfg.LoginDomain == "" {
 		cfg.LoginDomain = v.LoginDomain
 	}
-	stateFile := resolve(f.Storage.StateFile)
-	legacyState := resolve(f.Storage.LegacyState)
-	if meta.IsDefined("storage", "state_file") && meta.IsDefined("storage", "legacy_state") && stateFile != legacyState {
-		return nil, errors.New("conflicting storage.state_file and storage.legacy_state")
-	}
-	if stateFile != "" {
-		cfg.StateFile = stateFile
-	} else if legacyState != "" {
-		cfg.StateFile = legacyState
+	if f.Storage.StateFile != "" {
+		cfg.StateFile = resolve(f.Storage.StateFile)
 	}
 	cfg.Gateways = f.Routing.GatewayFilter
 	if f.Routing.FallbackAppID != "" {
-		cfg.Compatibility.FallbackAppID = f.Routing.FallbackAppID
+		cfg.Fallbacks.ApplicationID = f.Routing.FallbackAppID
 	}
 	if f.TLS.Gateway.ServerName != "" {
-		cfg.Compatibility.GatewayServerName = f.TLS.Gateway.ServerName
+		cfg.GatewayTLSName = f.TLS.Gateway.ServerName
 	}
 	cfg.CAFile = resolve(f.TLS.Gateway.CAFile)
 	socks, http, web := "127.0.0.1:1080", "127.0.0.1:8080", DefaultWebListen
@@ -274,17 +265,14 @@ func Migration(path string) ([]byte, error) {
 	if c.Version == 2 {
 		return os.ReadFile(path)
 	}
-	if c.CompatibilityExplicit && (c.Compatibility.ProcessIdentity != nil || len(c.Compatibility.FallbackGateways) > 0 || c.Compatibility.TCPToL3Fallback || c.Compatibility.MissingGatewayGroupFallback) {
-		return nil, errors.New("explicit legacy protocol/fallback settings require manual migration; keep the original configuration")
-	}
 	if len(c.Gateways) > 0 {
 		return nil, errors.New("legacy gateways override cannot be converted automatically; select permitted gateway filters explicitly")
 	}
 	var f FileV2
 	f.Version = 2
 	f.Controller.URL = c.BaseURL
-	if c.Compatibility.GatewayServerName == "" && c.Compatibility.FallbackAppID == "" && !c.Compatibility.TCPToL3Fallback && !c.Compatibility.MissingGatewayGroupFallback {
-		f.Controller.Deployment = "generic"
+	if c.GatewayTLSName == "" && c.Fallbacks.ApplicationID == "" && !c.Fallbacks.StreamToL3 && !c.Fallbacks.MissingGatewayGroup {
+		f.Controller.Compatibility = "generic"
 	}
 	f.Controller.Platform = c.Platform
 	f.Auth.Mode = c.ClientType
@@ -314,7 +302,7 @@ func Migration(path string) ([]byte, error) {
 	f.DNS.Servers = c.DNS
 	f.Logging.Level = c.LogLevel
 	f.Routing.FallbackAppID = c.AppID
-	f.TLS.Gateway.ServerName = c.Compatibility.GatewayServerName
+	f.TLS.Gateway.ServerName = c.GatewayTLSName
 	var b bytes.Buffer
 	e = toml.NewEncoder(&b).Encode(f)
 	return b.Bytes(), e

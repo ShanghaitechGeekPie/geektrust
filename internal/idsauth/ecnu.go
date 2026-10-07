@@ -192,7 +192,7 @@ func (c *ecnuClient) request(ctx context.Context, method, target, content string
 	return b, nil
 }
 func (c *ecnuClient) Login(ctx context.Context) error {
-	if c.BaseURL != c.Keystore.BaseURL() || c.Origin != c.BaseURL {
+	if c.BaseURL != strings.TrimRight(c.Keystore.BaseURL(), "/") || c.Origin != c.BaseURL {
 		return errors.New("credential origin mismatch")
 	}
 	page, err := c.request(ctx, http.MethodGet, c.BaseURL+"/login", "", nil, nil, true)

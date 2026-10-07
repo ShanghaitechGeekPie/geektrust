@@ -2,6 +2,7 @@ package tunnel
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -71,16 +72,14 @@ type testPinStore struct {
 	pins map[string][]byte
 }
 
-func (s *testPinStore) LoadPin(_ context.Context, addr string) ([]byte, error) {
+func (s *testPinStore) CheckOrEnroll(_ context.Context, addr, _ string, pin [32]byte) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return append([]byte(nil), s.pins[addr]...), nil
-}
-func (s *testPinStore) SavePin(_ context.Context, addr string, pin []byte) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.pins[addr] = append([]byte(nil), pin...)
-	return nil
+	if stored, ok := s.pins[addr]; ok {
+		return bytes.Equal(stored, pin[:]), nil
+	}
+	s.pins[addr] = append([]byte(nil), pin[:]...)
+	return true, nil
 }
 
 func TestGatewayTrustOnFirstUsePinsPublicKey(t *testing.T) {
@@ -94,13 +93,18 @@ func TestGatewayTrustOnFirstUsePinsPublicKey(t *testing.T) {
 	if _, err := newLines().bestForTest(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if pin, _ := store.LoadPin(ctx, addr); len(pin) != 32 {
+	store.mu.Lock()
+	length := len(store.pins[addr])
+	store.mu.Unlock()
+	if length != 32 {
 		t.Fatal("gateway public key was not persisted")
 	}
 	if _, err := newLines().bestForTest(ctx); err != nil {
 		t.Fatalf("matching gateway pin rejected: %v", err)
 	}
-	store.SavePin(ctx, addr, make([]byte, 32))
+	store.mu.Lock()
+	store.pins[addr] = make([]byte, 32)
+	store.mu.Unlock()
 	if _, err := newLines().bestForTest(ctx); err == nil || !strings.Contains(err.Error(), "public key changed") {
 		t.Fatalf("changed gateway key accepted: %v", err)
 	}

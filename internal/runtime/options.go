@@ -10,13 +10,13 @@ import (
 	"time"
 
 	"github.com/ShanghaitechGeekPie/geektrust/auth"
-	"github.com/ShanghaitechGeekPie/geektrust/deployment"
+	"github.com/ShanghaitechGeekPie/geektrust/compatibility"
 )
 
 type Options struct {
 	ControllerURL string
 	DeviceID      string
-	Deployment    deployment.Options
+	Compatibility compatibility.Options
 	Auth          AuthOptions
 	SessionStore  SessionStore
 	Network       NetworkOptions

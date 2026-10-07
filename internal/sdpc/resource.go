@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
-	defaults "github.com/ShanghaitechGeekPie/geektrust/internal/deployment"
+	defaults "github.com/ShanghaitechGeekPie/geektrust/internal/compatibility"
 	"net"
 	"net/url"
 	"strconv"
@@ -346,6 +346,9 @@ func (c *Client) parseResource(cr *clientResource) *Resource {
 						res.IPRules = append(res.IPRules, IPRule{
 							IPMin: min, IPMax: max, AppID: app.ID, Port: port, Proto: proto,
 						})
+					} else {
+						// A hyphen is also valid in an ordinary DNS hostname.
+						domains = append(domains, hostEntry{host, port, proto})
 					}
 				default:
 					domains = append(domains, hostEntry{host, port, proto})

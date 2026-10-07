@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"github.com/ShanghaitechGeekPie/geektrust/auth"
+	"github.com/ShanghaitechGeekPie/geektrust/internal/sdpc"
 	"time"
 )
 
@@ -42,6 +43,11 @@ func (p *Provider) Current() *Credential { p.mu.Lock(); defer p.mu.Unlock(); ret
 func (p *Provider) Close() {
 	p.mu.Lock()
 	p.closed = true
+	p.revision++
+	if p.cancelSession != nil {
+		p.cancelSession()
+		p.cancelSession = nil
+	}
 	p.cur = nil
 	p.mu.Unlock()
 	p.CloseObservers()
@@ -53,4 +59,38 @@ var ErrSessionReplaced = errors.New("session replaced")
 
 func ExpectGeneration(ctx context.Context, g uint64) context.Context {
 	return context.WithValue(ctx, expectedGenerationKey{}, g)
+}
+
+type acquisitionKey struct{}
+
+func withAcquisition(ctx context.Context, revision uint64) context.Context {
+	return context.WithValue(ctx, acquisitionKey{}, revision)
+}
+func (p *Provider) CheckAcquisition(ctx context.Context) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.checkAcquisitionLocked(ctx)
+}
+
+func (p *Provider) checkAcquisitionLocked(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if p.closed {
+		return context.Canceled
+	}
+	if revision, ok := ctx.Value(acquisitionKey{}).(uint64); ok && revision != p.revision {
+		return ErrSessionReplaced
+	}
+	return nil
+}
+
+// ActiveSession returns the credential and controller from one acquisition.
+func (p *Provider) ActiveSession() (*Credential, *sdpc.Client) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.cur == nil {
+		return nil, nil
+	}
+	return p.cur, p.cur.controller
 }

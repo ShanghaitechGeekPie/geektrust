@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ShanghaitechGeekPie/geektrust/internal/runtime"
 	"github.com/ShanghaitechGeekPie/geektrust/internal/sdpc"
 	"github.com/ShanghaitechGeekPie/geektrust/internal/session"
 )
@@ -25,7 +26,30 @@ type fakeProvider struct {
 	runCh     chan struct{}
 }
 
-func (f *fakeProvider) ActiveSDPC() *sdpc.Client { return f.sc }
+func (f *fakeProvider) QueryTrustDevice(ctx context.Context) (*sdpc.TrustDeviceList, error) {
+	if f.sc == nil {
+		return nil, runtime.ErrNoSession
+	}
+	return f.sc.QueryTrustDevice(ctx)
+}
+func (f *fakeProvider) TrustDevice(ctx context.Context) error {
+	if f.sc == nil {
+		return runtime.ErrNoSession
+	}
+	return f.sc.TrustDevice(ctx)
+}
+func (f *fakeProvider) UntrustDevice(ctx context.Context, ids []string) error {
+	if f.sc == nil {
+		return runtime.ErrNoSession
+	}
+	return f.sc.UntrustDevice(ctx, ids)
+}
+func (f *fakeProvider) LogoutTrustDevice(ctx context.Context, id string) error {
+	if f.sc == nil {
+		return runtime.ErrNoSession
+	}
+	return f.sc.LogoutDevice(ctx, id)
+}
 
 func (f *fakeProvider) TryForceRelogin() (func(context.Context), bool) {
 	if !f.reloginOK.Load() {

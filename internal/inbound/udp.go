@@ -146,7 +146,7 @@ func (t *udpFlowTable) flow(ctx context.Context, target udpTarget, boundSetup bo
 	if err != nil {
 		return nil, err
 	}
-	conn, err := t.server.dialer.DialUDP(ctx, resolved.IP, target.port, resolved.AppID, resolved.Domain)
+	conn, err := t.server.dialTarget(ctx, resolved, target.port, "udp")
 	if err != nil {
 		return nil, err
 	}

@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"github.com/ShanghaitechGeekPie/geektrust/auth"
-	"github.com/ShanghaitechGeekPie/geektrust/deployment"
+	"github.com/ShanghaitechGeekPie/geektrust/compatibility"
 	"github.com/ShanghaitechGeekPie/geektrust/internal/session"
 	"io"
 	"net/http"
@@ -41,7 +41,7 @@ func (s *contractStore) Load(context.Context, SessionScope) ([]byte, error) {
 func (s *contractStore) Save(context.Context, SessionScope, []byte) error { return nil }
 func (s *contractStore) Delete(context.Context, SessionScope) error       { return nil }
 func contractOptions(id *contractIdentity, store *contractStore) Options {
-	return Options{ControllerURL: "https://controller.example", DeviceID: "0123456789ABCDEF0123456789ABCDEF", Auth: AuthOptions{Identity: id}, Deployment: deployment.Options{Profile: deployment.Generic, Fallbacks: &deployment.Fallbacks{ApplicationID: "app", Gateways: []string{"gateway.example:441"}}}, Network: NetworkOptions{ControlTransport: compatibilityTransport{}}, SessionStore: store}
+	return Options{ControllerURL: "https://controller.example", DeviceID: "0123456789ABCDEF0123456789ABCDEF", Auth: AuthOptions{Identity: id}, Compatibility: compatibility.Options{Profile: compatibility.Generic, Fallbacks: &compatibility.Fallbacks{ApplicationID: "app", Gateways: []string{"gateway.example:441"}}}, Network: NetworkOptions{ControlTransport: fixtureTransport{}}, SessionStore: store}
 }
 func validState() session.State {
 	return session.State{Version: 1, ControllerURL: "https://controller.example", IdentityIssuer: "fixture", IdentitySubject: "account", IdentityKind: "passkey", DeviceID: "0123456789ABCDEF0123456789ABCDEF", ClientType: "browser", SID: "secret", Cookies: []session.CookieRecord{{Name: "sid", Value: "secret"}}}

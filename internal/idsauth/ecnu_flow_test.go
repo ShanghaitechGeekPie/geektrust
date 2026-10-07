@@ -25,8 +25,16 @@ func TestECNUFlow(t *testing.T) {
 		t.Fatal(err)
 	}
 	script := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der})
-	for _, failSave := range []bool{false, true} {
-		t.Run(fmt.Sprintf("storage_failure_%t", failSave), func(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		failSave bool
+		suffix   string
+	}{
+		{name: "storage_failure_false"},
+		{name: "storage_failure_true", failSave: true},
+		{name: "trailing_slash", suffix: "/"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			persisted, submitted := false, false
 			var origin string
 			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -67,11 +75,11 @@ func TestECNUFlow(t *testing.T) {
 			origin = server.URL
 			u, _ := url.Parse(origin)
 			fields := testKeystoreMap(t)
-			fields["base_url"], fields["rp_id"] = origin, u.Hostname()
+			fields["base_url"], fields["rp_id"] = origin+tc.suffix, u.Hostname()
 			blob := pythonFormat(t, fields)
 			blob = append(append([]byte{}, ecnuMagic...), blob[len(keystoreMagic):]...)
 			store, err := ParseKeystore(blob, func(b []byte) error {
-				if failSave {
+				if tc.failSave {
 					return errors.New("storage unavailable")
 				}
 				k, e := ParseKeystore(b, nil)
@@ -89,7 +97,7 @@ func TestECNUFlow(t *testing.T) {
 				t.Fatal(err)
 			}
 			err = NewClient(store, server.Client()).Login(context.Background())
-			if failSave {
+			if tc.failSave {
 				if err == nil || submitted {
 					t.Fatal("failed persistence did not stop authentication")
 				}

@@ -32,7 +32,7 @@ func cmdConfig(path string, args []string) error {
 			fmt.Println("configuration valid")
 			return nil
 		}
-		fmt.Printf("config_version = %d\ncontroller = %q\ndeployment = %q\nauth_mode = %q\ndns_strategy = %q\nkeystore = %q\nstate_file = %q\n", c.Version, c.BaseURL, c.Deployment, c.ClientType, c.DNSStrategy, c.Keystore, c.StateFile)
+		fmt.Printf("config_version = %d\ncontroller = %q\ncompatibility = %q\nauth_mode = %q\ndns_strategy = %q\nkeystore = %q\nstate_file = %q\n", c.Version, c.BaseURL, c.Compatibility, c.ClientType, c.DNSStrategy, c.Keystore, c.StateFile)
 		return nil
 	case "migrate":
 		fs := flag.NewFlagSet("config migrate", flag.ContinueOnError)

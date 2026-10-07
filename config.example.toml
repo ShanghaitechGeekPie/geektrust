@@ -8,7 +8,7 @@ keystore = "./ids-passkey.keystore"
 # 下列分组可按需启用。省略表示使用默认值。
 # [controller]
 # url = "https://vpn.shanghaitech.edu.cn"
-# deployment = "auto" # auto / shanghaitech / ecnu / generic
+# compatibility = "auto" # auto / shanghaitech / ecnu / generic
 # platform = "Mac"   # 控制器协议参数，与本机系统无关
 
 # [auth]

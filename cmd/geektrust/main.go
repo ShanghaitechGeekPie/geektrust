@@ -84,6 +84,9 @@ func main() {
 		fmt.Fprintln(os.Stderr, "geektrust:", err)
 		os.Exit(1)
 	}
+	if cfg.Version == 1 {
+		fmt.Fprintf(os.Stderr, "Warning: using a deprecated config (version 1). Run geektrust -config %q config migrate to preview the new format, then add --write to migrate.\n", configPath)
+	}
 	logger := newLogger(cfg.LogLevel)
 
 	switch cmd {
@@ -435,14 +438,10 @@ func cmdTrustDevice(ctx context.Context, cfg *config.Config, logger *slog.Logger
 	if _, err := c.Connect(ctx); err != nil {
 		return fmt.Errorf("trust-device: need an active session: %w", err)
 	}
-	sc := c.ActiveSDPC()
-	if sc == nil {
-		return fmt.Errorf("trust-device: no controller client available")
-	}
 
 	switch sub {
 	case "list":
-		list, err := sc.QueryTrustDevice(ctx)
+		list, err := c.QueryTrustDevice(ctx)
 		if err != nil {
 			return fmt.Errorf("query trust device: %w", err)
 		}
@@ -463,20 +462,20 @@ func cmdTrustDevice(ctx context.Context, cfg *config.Config, logger *slog.Logger
 		}
 
 	case "bind":
-		if err := sc.TrustDevice(ctx); err != nil {
+		if err := c.TrustDevice(ctx); err != nil {
 			return fmt.Errorf("bind trust device: %w", err)
 		}
 		fmt.Println("device bound as trusted terminal")
 		fmt.Println("subsequent logins with the same device_id may skip SMS verification")
 
 	case "unbind":
-		if err := sc.UntrustDevice(ctx, args[1:]); err != nil {
+		if err := c.UntrustDevice(ctx, args[1:]); err != nil {
 			return fmt.Errorf("unbind trust device: %w", err)
 		}
 		fmt.Printf("untrusted device(s): %s\n", strings.Join(args[1:], ", "))
 
 	case "logout":
-		if err := sc.LogoutDevice(ctx, args[1]); err != nil {
+		if err := c.LogoutTrustDevice(ctx, args[1]); err != nil {
 			return fmt.Errorf("logout trust device: %w", err)
 		}
 		fmt.Printf("logged out device: %s\n", args[1])

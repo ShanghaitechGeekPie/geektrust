@@ -14,7 +14,8 @@ import (
 
 	"golang.org/x/net/dns/dnsmessage"
 
-	"github.com/ShanghaitechGeekPie/geektrust/internal/idsauth"
+	"github.com/ShanghaitechGeekPie/geektrust/auth"
+	"github.com/ShanghaitechGeekPie/geektrust/internal/storage"
 )
 
 type testGatewayPins struct {
@@ -22,35 +23,33 @@ type testGatewayPins struct {
 	pins map[string][]byte
 }
 
-func (s *testGatewayPins) LoadPin(ctx context.Context, addr string) ([]byte, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return append([]byte(nil), s.pins[addr]...), nil
-}
-
-func (s *testGatewayPins) SavePin(ctx context.Context, addr string, pin []byte) error {
+func (s *testGatewayPins) CheckOrEnroll(_ context.Context, id GatewayIdentity, pin [32]byte) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.pins == nil {
 		s.pins = make(map[string][]byte)
 	}
-	s.pins[addr] = append([]byte(nil), pin...)
-	return nil
+	key := id.ControllerURL + "|" + id.Address + "|" + id.ServerName
+	if old := s.pins[key]; old != nil {
+		return string(old) == string(pin[:]), nil
+	}
+	s.pins[key] = append([]byte(nil), pin[:]...)
+	return true, nil
 }
 
 func TestValidateOptions(t *testing.T) {
 	for _, url := range []string{"http://vpn.example", "https://user:secret@vpn.example", "https://vpn.example/?token=x"} {
-		if _, err := newLegacy(legacyOptions{ControllerURL: url, DeviceID: "0123456789ABCDEF0123456789ABCDEF", Authenticator: AuthenticatorFunc(func(context.Context, *http.Client) (string, error) { return "", nil })}); err == nil {
+		if _, err := New(Options{ControllerURL: url, DeviceID: "0123456789ABCDEF0123456789ABCDEF", Auth: AuthOptions{Identity: identityFunc(func(context.Context, *http.Client, auth.IdentityRequest) error { return nil })}}); err == nil {
 			t.Fatal("invalid options accepted")
 		}
 	}
 }
 func TestClosedClient(t *testing.T) {
 	id, _ := NewDeviceID()
-	c, err := newLegacy(legacyOptions{ControllerURL: "https://vpn.example", DeviceID: id, Authenticator: AuthenticatorFunc(func(context.Context, *http.Client) (string, error) {
+	c, err := New(Options{ControllerURL: "https://vpn.example", DeviceID: id, Auth: AuthOptions{Identity: identityFunc(func(context.Context, *http.Client, auth.IdentityRequest) error {
 		t.Error("closed client authenticated")
-		return "", nil
-	})})
+		return nil
+	})}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,16 +79,11 @@ func TestECNULiveAccess(t *testing.T) {
 		t.Skip("explicit live credential required")
 	}
 	id, _ := NewDeviceID()
-	c, err := newLegacy(legacyOptions{Logger: slog.New(stageHandler{t}), ControllerURL: "https://vpn.ecnu.edu.cn", DeviceID: id, GatewayTrustStore: &testGatewayPins{}, Authenticator: AuthenticatorFunc(func(ctx context.Context, h *http.Client) (string, error) {
-		k, err := idsauth.LoadKeystore(path)
-		if err != nil {
-			return "", err
-		}
-		if err = idsauth.NewClient(k, h).Login(ctx); err != nil {
-			return "", err
-		}
-		return k.Username(), nil
-	})})
+	identity, err := auth.NewPasskey(storage.CredentialFile(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := New(Options{Logger: slog.New(stageHandler{t}), ControllerURL: "https://vpn.ecnu.edu.cn", DeviceID: id, Auth: AuthOptions{Identity: identity}, Network: NetworkOptions{GatewayTLS: GatewayTLSOptions{Mode: VerifyCAOrTOFU, PinStore: &testGatewayPins{}}}})
 	if err != nil {
 		t.Fatal(err)
 	}

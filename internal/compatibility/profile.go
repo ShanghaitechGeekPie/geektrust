@@ -1,16 +1,17 @@
-// Package deployment owns the verified defaults for known controllers.
-package deployment
+// Package compatibility owns the verified defaults for known controllers.
+package compatibility
 
 import (
-	public "github.com/ShanghaitechGeekPie/geektrust/deployment"
-	"github.com/ShanghaitechGeekPie/geektrust/internal/settings"
+	public "github.com/ShanghaitechGeekPie/geektrust/compatibility"
 	"net/url"
 	"strings"
 )
 
 type Resolved struct {
 	Profile               public.Profile
-	Compatibility         settings.Compatibility
+	Fallbacks             public.Fallbacks
+	Process               *public.ProcessMetadata
+	GatewayServerName     string
 	Platform, LoginDomain string
 }
 
@@ -36,13 +37,14 @@ func Resolve(origin string, o public.Options) Resolved {
 		v.Platform = o.Protocol.ControllerPlatform
 	}
 	if x := o.Protocol.Process; x != nil {
-		v.Compatibility.ProcessIdentity = &settings.ProcessIdentity{Name: x.Name, Platform: x.Platform, Path: x.Path}
+		value := *x
+		v.Process = &value
 	}
 	if f := o.Fallbacks; f != nil {
-		v.Compatibility.FallbackAppID = f.ApplicationID
-		v.Compatibility.FallbackGateways = append([]string(nil), f.Gateways...)
-		v.Compatibility.MissingGatewayGroupFallback = f.MissingGatewayGroup
-		v.Compatibility.TCPToL3Fallback = f.StreamToL3
+		v.Fallbacks.ApplicationID = f.ApplicationID
+		v.Fallbacks.Gateways = append([]string(nil), f.Gateways...)
+		v.Fallbacks.MissingGatewayGroup = f.MissingGatewayGroup
+		v.Fallbacks.StreamToL3 = f.StreamToL3
 	}
 	return v
 }

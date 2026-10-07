@@ -7,12 +7,10 @@ import (
 	"encoding/json"
 	"errors"
 	"github.com/ShanghaitechGeekPie/geektrust/auth"
-	"github.com/ShanghaitechGeekPie/geektrust/deployment"
+	"github.com/ShanghaitechGeekPie/geektrust/compatibility"
 	"github.com/ShanghaitechGeekPie/geektrust/internal/resolver"
 	"github.com/ShanghaitechGeekPie/geektrust/internal/sdpc"
 	"github.com/ShanghaitechGeekPie/geektrust/internal/session"
-	"net"
-	"sync"
 	"time"
 )
 
@@ -28,12 +26,12 @@ const (
 )
 
 type Status struct {
-	Revision   uint64
-	Generation uint64
-	State      SessionState
-	Deployment deployment.Profile
-	Session    *SessionInfo
-	LastError  *ErrorInfo
+	Revision      uint64
+	Generation    uint64
+	State         SessionState
+	Compatibility compatibility.Profile
+	Session       *SessionInfo
+	LastError     *ErrorInfo
 }
 
 type ErrorKind string
@@ -177,8 +175,12 @@ func (c *Runtime) prepare(ctx context.Context) error {
 	if c.isClosed() {
 		return ErrClosed
 	}
-	c.identityMu.Lock()
-	defer c.identityMu.Unlock()
+	select {
+	case c.identityGate <- struct{}{}:
+		defer func() { <-c.identityGate }()
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 	info, e := c.identity.Info(ctx)
 	if e != nil {
 		return e
@@ -209,10 +211,7 @@ func (c *Runtime) start() {
 func (c *Runtime) Status() Status { c.mu.Lock(); defer c.mu.Unlock(); return cloneStatus(c.status) }
 func cloneStatus(s Status) Status {
 	if s.Session != nil {
-		v := *s.Session
-		v.Gateways = append([]string(nil), v.Gateways...)
-		v.DNS = append([]string(nil), v.DNS...)
-		v.Resources = append([]Resource(nil), v.Resources...)
+		v := cloneSession(*s.Session)
 		s.Session = &v
 	}
 	if s.LastError != nil {
@@ -250,10 +249,10 @@ func (c *Runtime) Subscribe(ctx context.Context) <-chan Event {
 }
 func (c *Runtime) publishLocked() {
 	c.status.Revision++
-	c.status.Generation = c.generation
-	c.status.Deployment = c.profile
-	ev := Event{Time: time.Now(), Status: cloneStatus(c.status)}
+	c.status.Compatibility = c.profile
+	now := time.Now()
 	for _, ch := range c.subscribers {
+		ev := Event{Time: now, Status: cloneStatus(c.status)}
 		select {
 		case ch <- ev:
 		default:
@@ -266,7 +265,9 @@ func (c *Runtime) publishLocked() {
 	}
 }
 func (c *Runtime) Shutdown(ctx context.Context) error {
-	c.Close()
+	// Closing a socket can wait for a protocol close write. The caller's
+	// deadline bounds the wait while cleanup continues to completion.
+	go c.Close()
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
@@ -280,18 +281,28 @@ func (c *Runtime) ForgetSession(parent context.Context) error {
 	if e := c.prepare(ctx); e != nil {
 		return e
 	}
-	c.provider.Invalidate()
-	c.resetConnections()
+	if err := c.cache.lock(ctx); err != nil {
+		return err
+	}
+	defer c.cache.unlock()
 	c.mu.Lock()
+	if err := ctx.Err(); err != nil {
+		c.mu.Unlock()
+		return err
+	}
 	c.forgotten = true
 	c.mu.Unlock()
-	store := c.providerStore()
-	if store == nil {
+	c.provider.Invalidate()
+	c.resetConnections()
+	if c.cache.store == nil {
 		return nil
 	}
-	return store.Delete(ctx, c.scope)
+	if err := c.cache.store.Delete(ctx, c.scope); err != nil {
+		return &Error{Info: ErrorInfo{Kind: ErrorStorage, Op: "forget_session", Message: "session storage delete failed"}, cause: sanitizedCause{err}}
+	}
+	return nil
 }
-func (c *Runtime) providerStore() SessionStore { return c.store }
+
 func (c *Runtime) resetConnections() {
 	c.mu.Lock()
 	conns := make([]*ownedConn, 0, len(c.conns))
@@ -316,8 +327,13 @@ func (o clientObserver) OnSessionEvent(e session.Event) {
 		return
 	}
 	current := c.provider.Current()
-	if current != nil && (e.Kind == session.EventLoginStart || e.Kind == session.EventLoginFailed || e.Kind == session.EventInvalidated) {
+	if current != nil && (e.Kind == session.EventLoginStart || e.Kind == session.EventLoginFailed || e.Kind == session.EventInteractionRequired || e.Kind == session.EventInvalidated) {
 		return
+	}
+	if e.Kind == session.EventLoginSuccess || e.Kind == session.EventRestoreOK {
+		if e.Session == nil || current == nil || e.Session.Generation != current.Generation {
+			return
+		}
 	}
 	if e.Session != nil && current != nil && e.Session.Generation != current.Generation {
 		return
@@ -330,14 +346,8 @@ func (o clientObserver) OnSessionEvent(e session.Event) {
 		c.status.State = Authenticating
 	case session.EventLoginSuccess, session.EventRestoreOK:
 		c.status.State = Ready
-		c.generation = e.Session.Generation
-		v := SessionInfo{Generation: c.generation}
-		if e.Session != nil {
-			v.Username = e.Session.Username
-			v.DisplayName = e.Session.DisplayName
-			v.Gateways = append([]string(nil), e.Session.Gateways...)
-			v.DNS = append([]string(nil), e.Session.DNS...)
-		}
+		c.status.Generation = current.Generation
+		v := sessionInfo(current)
 		c.status.Session = &v
 		c.status.LastError = nil
 	case session.EventInteractionRequired:
@@ -349,6 +359,7 @@ func (o clientObserver) OnSessionEvent(e session.Event) {
 	case session.EventInvalidated:
 		c.status.State = Idle
 		c.status.Session = nil
+		c.status.LastError = nil
 	default:
 		return
 	}
@@ -356,12 +367,16 @@ func (o clientObserver) OnSessionEvent(e session.Event) {
 }
 
 type stateStore struct {
+	gate   chan struct{}
 	store  SessionStore
 	client *Runtime
-	mu     sync.Mutex
 }
 
 func (s *stateStore) Load(ctx context.Context) (*session.State, error) {
+	if err := s.lock(ctx); err != nil {
+		return nil, err
+	}
+	defer s.unlock()
 	if s.store == nil {
 		return nil, nil
 	}
@@ -391,6 +406,13 @@ func (s *stateStore) Load(ctx context.Context) (*session.State, error) {
 	return &st, nil
 }
 func (s *stateStore) Save(ctx context.Context, st *session.State) error {
+	if err := s.lock(ctx); err != nil {
+		return err
+	}
+	defer s.unlock()
+	if err := s.client.provider.CheckAcquisition(ctx); err != nil {
+		return err
+	}
 	if s.store == nil {
 		return nil
 	}
@@ -400,6 +422,9 @@ func (s *stateStore) Save(ctx context.Context, st *session.State) error {
 	}
 	if e = s.store.Save(ctx, s.client.scope, b); e != nil {
 		return &Error{Info: ErrorInfo{Kind: ErrorStorage, Message: "session storage save failed"}, cause: sanitizedCause{e}}
+	}
+	if err := s.client.provider.CheckAcquisition(ctx); err != nil {
+		return err
 	}
 	s.client.mu.Lock()
 	s.client.forgotten = false
@@ -411,28 +436,14 @@ func (s *stateStore) Save(ctx context.Context, st *session.State) error {
 type pinAdapter struct {
 	store      GatewayPinStore
 	controller string
-	template   *tls.Config
 }
 
-func (p pinAdapter) LoadPin(ctx context.Context, a string) ([]byte, error) { return nil, nil }
-func (p pinAdapter) SavePin(ctx context.Context, a string, b []byte) error {
-	var pin [32]byte
-	copy(pin[:], b)
-	name := ""
-	if p.template != nil {
-		name = p.template.ServerName
+func (p pinAdapter) CheckOrEnroll(ctx context.Context, address, serverName string, pin [32]byte) (bool, error) {
+	ok, err := p.store.CheckOrEnroll(ctx, GatewayIdentity{ControllerURL: p.controller, Address: address, ServerName: serverName}, pin)
+	if err != nil {
+		return false, &Error{Info: ErrorInfo{Kind: ErrorStorage, Message: "gateway pin storage failed"}, cause: sanitizedCause{err}}
 	}
-	if name == "" {
-		name, _, _ = net.SplitHostPort(a)
-	}
-	ok, e := p.store.CheckOrEnroll(ctx, GatewayIdentity{ControllerURL: p.controller, Address: a, ServerName: name}, pin)
-	if e != nil {
-		return &Error{Info: ErrorInfo{Kind: ErrorStorage, Message: "gateway pin storage failed"}}
-	}
-	if !ok {
-		return errors.New("gateway public key changed")
-	}
-	return nil
+	return ok, nil
 }
 
 func PublicError(op string, e error) error { return safeError(op, e) }
@@ -448,3 +459,20 @@ func ConfigError(e error) error {
 	}
 	return &Error{Info: ErrorInfo{Kind: ErrorConfig, Op: "new", Message: e.Error()}}
 }
+
+func cloneSession(s SessionInfo) SessionInfo {
+	s.Gateways = append([]string(nil), s.Gateways...)
+	s.DNS = append([]string(nil), s.DNS...)
+	s.Resources = append([]Resource(nil), s.Resources...)
+	return s
+}
+
+func (s *stateStore) lock(ctx context.Context) error {
+	select {
+	case s.gate <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+func (s *stateStore) unlock() { <-s.gate }

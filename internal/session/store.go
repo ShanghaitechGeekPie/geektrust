@@ -188,12 +188,6 @@ func decrypt(key, sealed []byte) ([]byte, error) {
 	return gcm.Open(nil, nonce, ct, nil)
 }
 
-// writeFileAtomic writes via temp file + rename so secrets are never left
-// half-written.
-func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
-	return storage.WriteAtomic(path, data, perm)
-}
-
 // StateStore persists session state; embedding applications can supply protected storage.
 type StateStore interface {
 	Load(context.Context) (*State, error)

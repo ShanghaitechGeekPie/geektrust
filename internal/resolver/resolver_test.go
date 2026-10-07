@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"net"
+	"net/netip"
 	"testing"
 	"time"
 
@@ -218,5 +219,16 @@ func TestResolveRejectsGatewayLoops(t *testing.T) {
 	}
 	if got.IP != "10.13.90.147" || got.AppID != "" {
 		t.Fatalf("non-gateway endpoint resolution = %+v", got)
+	}
+}
+
+func TestHostFallbackSkipsFakeIP(t *testing.T) {
+	provider := &staticProvider{cred: &session.Credential{Policy: &sdpc.Resource{}, AppID: "fixture"}}
+	r := NewController(provider, nil, func(context.Context, string) ([]netip.Addr, error) {
+		return []netip.Addr{netip.MustParseAddr("198.18.1.1"), netip.MustParseAddr("192.0.2.1")}, nil
+	}, false)
+	got, err := r.Resolve(context.Background(), "resource.example", 443)
+	if err != nil || got.IP != "192.0.2.1" {
+		t.Fatalf("fallback = %+v, %v", got, err)
 	}
 }

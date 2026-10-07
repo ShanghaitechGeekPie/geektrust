@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/ShanghaitechGeekPie/geektrust/compatibility"
 	"io"
 	"net"
 	"strconv"
@@ -283,7 +284,7 @@ func buildTCPRequest(cred *session.Credential, ip string, port int, appID, domai
 	}
 	processPlatform := "Linux"
 	if identity := cred.ProcessIdentity; identity != nil {
-		if err := identity.Validate(); err != nil {
+		if err := (compatibility.Options{Protocol: compatibility.ProtocolOptions{Process: identity}}).Validate(); err != nil {
 			return nil, err
 		}
 		processName, processPath, processPlatform = identity.Name, identity.Path, identity.Platform

@@ -127,7 +127,7 @@ func (d *Dialer) dialWithRetry(ctx context.Context, network, ip string, port int
 	return nil, fmt.Errorf("dial %s:%d after %d attempt(s): %w", ip, port, attempts, lastErr)
 }
 func shouldRetryDial(err error) bool {
-	if errors.Is(err, syscall.ECONNREFUSED) {
+	if errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, context.Canceled) || errors.Is(err, session.ErrSessionReplaced) {
 		return false
 	}
 	var rejected *AuthRejectedError

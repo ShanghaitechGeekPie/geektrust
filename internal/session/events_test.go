@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -14,8 +15,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ShanghaitechGeekPie/geektrust/internal/config"
 	"github.com/ShanghaitechGeekPie/geektrust/internal/sdpc"
+	"github.com/ShanghaitechGeekPie/geektrust/internal/settings"
 )
 
 // recordObserver collects events and lets tests hook individual kinds.
@@ -68,15 +69,11 @@ const testDeviceID = "0123456789ABCDEF0123456789ABCDEF"
 
 func failingProvider(t *testing.T) *Provider {
 	t.Helper()
-	dir := t.TempDir()
-	return NewProvider(&config.Config{
-		Keystore:   filepath.Join(dir, "missing.keystore"),
-		DeviceID:   testDeviceID,
-		BaseURL:    "http://127.0.0.1:1",
-		Platform:   "Mac",
-		ClientType: "browser",
-		StateFile:  filepath.Join(dir, "state.enc"),
-	}, testLogger(), nil)
+	p := NewProvider(settings.Session{DeviceID: testDeviceID, BaseURL: "http://127.0.0.1:1", Platform: "Mac", ClientType: "browser"}, testLogger(), nil)
+	p.Authenticate = func(context.Context, *http.Client) (string, error) {
+		return "", errors.New("fixture authentication failed")
+	}
+	return p
 }
 
 func TestSanitizeErrorText(t *testing.T) {
@@ -187,15 +184,12 @@ func newRestoreFixture(t *testing.T, handler http.HandlerFunc) *Provider {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	return NewProvider(&config.Config{
-		Keystore:   filepath.Join(dir, "missing.keystore"),
-		DeviceID:   testDeviceID,
-		BaseURL:    srv.URL,
-		Platform:   "Mac",
-		ClientType: "browser",
-		StateFile:  statePath,
-		Gateways:   []string{"192.0.2.1:441"},
-	}, testLogger(), nil)
+	p := NewProvider(settings.Session{DeviceID: testDeviceID, BaseURL: srv.URL, Platform: "Mac", ClientType: "browser", Gateways: []string{"192.0.2.1:441"}, LegacyGatewayOverride: true}, testLogger(), nil)
+	p.SetStore(NewStore(statePath))
+	p.Authenticate = func(context.Context, *http.Client) (string, error) {
+		return "", errors.New("fixture full login disabled")
+	}
+	return p
 }
 
 func TestRestoreSuccessEmitsSessionInfo(t *testing.T) {
@@ -204,7 +198,8 @@ func TestRestoreSuccessEmitsSessionInfo(t *testing.T) {
 	obs := &recordObserver{hook: func(ev Event) {
 		if ev.Kind == EventRestoreOK {
 			// The credential must be published before the event is queued.
-			activeDuringEvent <- p.ActiveSDPC() != nil
+			_, sc := p.ActiveSession()
+			activeDuringEvent <- sc != nil
 		}
 	}}
 	p.AddObserver(obs)
@@ -216,7 +211,7 @@ func TestRestoreSuccessEmitsSessionInfo(t *testing.T) {
 	select {
 	case ok := <-activeDuringEvent:
 		if !ok {
-			t.Error("ActiveSDPC returned nil inside restore_success callback")
+			t.Error("ActiveSession returned nil inside restore_success callback")
 		}
 	case <-time.After(time.Second):
 		t.Fatal("restore_success hook did not run")
@@ -450,7 +445,8 @@ func TestFinishRefreshPublishesLoginSuccess(t *testing.T) {
 	active := make(chan bool, 1)
 	obs := &recordObserver{hook: func(ev Event) {
 		if ev.Kind == EventLoginSuccess {
-			active <- p.ActiveSDPC() != nil
+			_, sc := p.ActiveSession()
+			active <- sc != nil
 		}
 	}}
 	p.AddObserver(obs)
@@ -458,10 +454,9 @@ func TestFinishRefreshPublishesLoginSuccess(t *testing.T) {
 	call := &refreshCall{done: make(chan struct{})}
 	p.mu.Lock()
 	p.refreshing = call
-	p.sdpc = &sdpc.Client{}
 	p.mu.Unlock()
 
-	cred := &Credential{SID: "sid", DeviceID: testDeviceID, Gateways: []string{"g1"}}
+	cred := &Credential{controller: &sdpc.Client{}, SID: "sid", DeviceID: testDeviceID, Gateways: []string{"g1"}}
 	session := &SessionInfo{Username: "u1", DisplayName: "测试用户", DeviceID: testDeviceID}
 
 	// A waiter joins the reserved slot and must receive the published result.
@@ -484,7 +479,7 @@ func TestFinishRefreshPublishesLoginSuccess(t *testing.T) {
 	select {
 	case ok := <-active:
 		if !ok {
-			t.Error("ActiveSDPC returned nil inside login_success callback")
+			t.Error("ActiveSession returned nil inside login_success callback")
 		}
 	case <-time.After(time.Second):
 		t.Fatal("login_success hook did not run")
@@ -508,5 +503,29 @@ func TestSessionInfoCopiesSlices(t *testing.T) {
 	info.Gateways[0] = "mutated"
 	if cred.Gateways[0] != "g1" {
 		t.Error("SessionInfo aliases credential gateways")
+	}
+}
+
+func TestInvalidationRejectsInFlightRestore(t *testing.T) {
+	entered, release := make(chan struct{}), make(chan struct{})
+	p := newRestoreFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/controller/v1/user/clientResource" {
+			close(entered)
+			<-release
+		}
+		restoreHandler(w, r)
+	})
+	defer p.Close()
+	result := make(chan error, 1)
+	go func() { _, err := p.Credential(context.Background()); result <- err }()
+	<-entered
+	p.Invalidate()
+	close(release)
+	if err := <-result; !errors.Is(err, ErrSessionReplaced) {
+		t.Fatalf("stale restore = %v, want session replaced", err)
+	}
+	cred, sc := p.ActiveSession()
+	if cred != nil || sc != nil {
+		t.Fatal("invalidated acquisition published a controller or credential")
 	}
 }

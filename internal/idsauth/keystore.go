@@ -96,7 +96,7 @@ func (k *Keystore) validate() error {
 		}
 	}
 	u, err := url.Parse(k.BaseURL())
-	if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
+	if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.ForceQuery || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
 		return fmt.Errorf("credential base_url must be an HTTPS origin")
 	}
 	if !rpIDMatchesOrigin(k.RpID(), k.BaseURL()) {

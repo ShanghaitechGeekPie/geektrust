@@ -19,8 +19,8 @@ import (
 	"time"
 
 	"github.com/ShanghaitechGeekPie/geektrust/auth"
-	"github.com/ShanghaitechGeekPie/geektrust/deployment"
-	defaults "github.com/ShanghaitechGeekPie/geektrust/internal/deployment"
+	"github.com/ShanghaitechGeekPie/geektrust/compatibility"
+	defaults "github.com/ShanghaitechGeekPie/geektrust/internal/compatibility"
 	"github.com/ShanghaitechGeekPie/geektrust/internal/settings"
 
 	"github.com/ShanghaitechGeekPie/geektrust/internal/l3"
@@ -71,14 +71,12 @@ type Runtime struct {
 	subscribers    map[uint64]chan Event
 	nextSubscriber uint64
 	status         Status
-	store          SessionStore
-	generation     uint64
+	cache          *stateStore
 	identity       auth.IdentityProvider
 	scope          SessionScope
-	identityMu     sync.Mutex
+	identityGate   chan struct{}
 	identityReady  bool
-	mode           SessionMode
-	profile        deployment.Profile
+	profile        compatibility.Profile
 	dialTimeout    time.Duration
 	startOnce      sync.Once
 	tasksDone      chan struct{}
@@ -87,7 +85,7 @@ type Runtime struct {
 
 func New(opts Options) (*Runtime, error) {
 	u, err := url.Parse(opts.ControllerURL)
-	if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
+	if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.ForceQuery || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
 		return nil, errors.New("controller must be an HTTPS origin")
 	}
 	if len(opts.DeviceID) != 32 || strings.Trim(opts.DeviceID, "0123456789ABCDEF") != "" {
@@ -102,7 +100,7 @@ func New(opts Options) (*Runtime, error) {
 	if opts.Network.DialTimeout < 0 || opts.Network.HTTPTimeout < 0 {
 		return nil, errors.New("invalid network timeout")
 	}
-	if err := opts.Deployment.Validate(); err != nil {
+	if err := opts.Compatibility.Validate(); err != nil {
 		return nil, err
 	}
 	if opts.Network.GatewayTLS.Mode != VerifyCA && opts.Network.GatewayTLS.Mode != VerifyCAOrTOFU {
@@ -117,7 +115,7 @@ func New(opts Options) (*Runtime, error) {
 	if opts.Logger == nil {
 		opts.Logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
-	resolved := defaults.Resolve(opts.ControllerURL, opts.Deployment)
+	resolved := defaults.Resolve(opts.ControllerURL, opts.Compatibility)
 	mode := "browser"
 	if opts.Auth.Mode == DesktopMode {
 		mode = "client"
@@ -131,7 +129,7 @@ func New(opts Options) (*Runtime, error) {
 	}
 	u.Path = ""
 	u.RawPath = ""
-	cfg := settings.Session{BaseURL: u.String(), DeviceID: opts.DeviceID, Platform: resolved.Platform, LoginDomain: opts.Auth.LoginDomain, ClientType: mode, Compatibility: resolved.Compatibility, StrictStorage: true, GatewayFilter: opts.Network.AllowedGateways != nil}
+	cfg := settings.Session{BaseURL: u.String(), DeviceID: opts.DeviceID, Platform: resolved.Platform, LoginDomain: opts.Auth.LoginDomain, ClientType: mode, Fallbacks: resolved.Fallbacks, Process: resolved.Process, GatewayFilter: opts.Network.AllowedGateways != nil}
 	if cfg.LoginDomain == "" {
 		cfg.LoginDomain = resolved.LoginDomain
 	}
@@ -155,7 +153,7 @@ func New(opts Options) (*Runtime, error) {
 			cfg.DNS[i] = x.String()
 		}
 	}
-	mapDomains := resolved.Profile == deployment.ShanghaiTech
+	mapDomains := resolved.Profile == compatibility.ShanghaiTech
 	cfg.DomainMapping = &mapDomains
 	p := session.NewProvider(cfg, opts.Logger, nil)
 	p.ChallengeHandler = opts.Auth.OnChallenge
@@ -178,7 +176,7 @@ func New(opts Options) (*Runtime, error) {
 			m.GatewayTLSConfig.RootCAs = t.RootCAs.Clone()
 		}
 	}
-	if name := resolved.Compatibility.GatewayServerName; name != "" {
+	if name := resolved.GatewayServerName; name != "" {
 		if m.GatewayTLSConfig == nil {
 			m.GatewayTLSConfig = &tls.Config{ServerName: name}
 		} else if m.GatewayTLSConfig.ServerName == "" {
@@ -186,11 +184,11 @@ func New(opts Options) (*Runtime, error) {
 		}
 	}
 	if opts.Network.GatewayTLS.PinStore != nil {
-		m.GatewayTrustStore = pinAdapter{store: opts.Network.GatewayTLS.PinStore, controller: cfg.BaseURL, template: m.GatewayTLSConfig}
+		m.GatewayTrustStore = pinAdapter{store: opts.Network.GatewayTLS.PinStore, controller: cfg.BaseURL}
 	}
 	d := &l3.Dialer{Manager: m, Provider: p, Logger: opts.Logger}
 	ctx, cancel := context.WithCancel(context.Background())
-	c := &Runtime{checkTarget: opts.CheckTarget, provider: p, manager: m, dialer: d, transport: owned, ctx: ctx, cancel: cancel, conns: make(map[*ownedConn]struct{}), store: opts.SessionStore, status: Status{State: Idle}, identity: opts.Auth.Identity, mode: opts.Auth.Mode, profile: resolved.Profile, dialTimeout: opts.Network.DialTimeout, subscribers: make(map[uint64]chan Event), tasksDone: make(chan struct{}), shutdownDone: make(chan struct{})}
+	c := &Runtime{checkTarget: opts.CheckTarget, provider: p, manager: m, dialer: d, transport: owned, ctx: ctx, cancel: cancel, conns: make(map[*ownedConn]struct{}), status: Status{State: Idle}, identity: opts.Auth.Identity, identityGate: make(chan struct{}, 1), profile: resolved.Profile, dialTimeout: opts.Network.DialTimeout, subscribers: make(map[uint64]chan Event), tasksDone: make(chan struct{}), shutdownDone: make(chan struct{})}
 	p.Authenticate = func(ctx context.Context, h *http.Client) (string, error) {
 		if e := c.prepare(ctx); e != nil {
 			return "", e
@@ -202,7 +200,8 @@ func New(opts Options) (*Runtime, error) {
 	}
 	c.resolver = resolver.NewController(p, checkedDNSDialer{c}, opts.DNS.FallbackLookup, opts.DNS.Servers != nil && len(opts.DNS.Servers) == 0)
 	c.scope = SessionScope{ControllerURL: cfg.BaseURL, DeviceID: cfg.DeviceID, Mode: opts.Auth.Mode, LoginDomain: cfg.LoginDomain}
-	p.SetStore(&stateStore{store: opts.SessionStore, client: c})
+	c.cache = &stateStore{store: opts.SessionStore, client: c, gate: make(chan struct{}, 1)}
+	p.SetStore(c.cache)
 	return c, nil
 }
 func NewDeviceID() (string, error) {
@@ -269,29 +268,15 @@ func (c *Runtime) Connect(parent context.Context) (SessionInfo, error) {
 	if c.closed {
 		return SessionInfo{}, ErrClosed
 	}
+	if c.provider.Current() != cred {
+		return SessionInfo{}, session.ErrSessionReplaced
+	}
 	c.start()
-	c.generation = cred.Generation
-	info := SessionInfo{Gateways: append([]string(nil), cred.Gateways...), DNS: append([]string(nil), cred.DNS...), Generation: c.generation, Username: cred.Username, DisplayName: cred.DisplayName}
-	for _, r := range cred.Policy.IPRules {
-		address := ""
-		switch {
-		case r.IP != nil:
-			address = r.IP.String()
-		case r.Net != nil:
-			address = r.Net.String()
-		case r.IPMin != nil:
-			address = r.IPMin.String() + "-" + r.IPMax.String()
-		}
-		info.Resources = append(info.Resources, Resource{Address: address, Protocol: r.Proto, ApplicationID: r.AppID, GatewayGroup: cred.Policy.AppNodeGroups[r.AppID], PortMin: r.Port.Min, PortMax: r.Port.Max})
-	}
-	for _, r := range cred.Policy.DomainRules {
-		info.Resources = append(info.Resources, Resource{Address: r.Domain, Protocol: r.Proto, ApplicationID: r.AppID, GatewayGroup: cred.Policy.AppNodeGroups[r.AppID], PortMin: r.Port.Min, PortMax: r.Port.Max})
-	}
-	for _, r := range cred.Policy.SuffixRules {
-		info.Resources = append(info.Resources, Resource{Address: "*" + r.Suffix, Protocol: r.Proto, ApplicationID: r.AppID, GatewayGroup: cred.Policy.AppNodeGroups[r.AppID], PortMin: r.Port.Min, PortMax: r.Port.Max})
-	}
+	info := sessionInfo(cred)
+	c.status.Generation = cred.Generation
 	c.status.State = Ready
-	c.status.Session = &info
+	snapshot := cloneSession(info)
+	c.status.Session = &snapshot
 	c.status.LastError = nil
 	c.publishLocked()
 	return info, nil
@@ -309,6 +294,12 @@ func (c *Runtime) OpenTransport(parent context.Context) (TransportInfo, error) {
 	if err := c.prepare(ctx); err != nil {
 		return TransportInfo{}, err
 	}
+	cred, err := c.provider.Credential(ctx)
+	if err != nil {
+		return TransportInfo{}, err
+	}
+	ctx, releaseSession := bindSession(ctx, cred)
+	defer releaseSession()
 	t, err := c.manager.Tunnel(ctx)
 	if err != nil {
 		return TransportInfo{}, err
@@ -317,7 +308,13 @@ func (c *Runtime) OpenTransport(parent context.Context) (TransportInfo, error) {
 	if ip == nil {
 		return TransportInfo{}, errors.New("gateway did not assign an IPv4 virtual address")
 	}
-	return TransportInfo{Generation: c.currentGeneration(), Gateway: t.Addr(), VirtualIPv4: ip.String()}, nil
+	if c.provider.Current() != cred {
+		return TransportInfo{}, session.ErrSessionReplaced
+	}
+	if err := ctx.Err(); err != nil {
+		return TransportInfo{}, err
+	}
+	return TransportInfo{Generation: cred.Generation, Gateway: t.Addr(), VirtualIPv4: ip.String()}, nil
 }
 
 func (c *Runtime) DialContext(parent context.Context, network, address string) (net.Conn, error) {
@@ -355,16 +352,6 @@ func (c *Runtime) DialContext(parent context.Context, network, address string) (
 	return c.dialResolved(ctx, target, port, protocol)
 }
 
-// RoutePlan is an immutable decision under one credential generation.
-type RoutePlan struct {
-	Target       resolver.Resolution
-	Port         int
-	Network      string
-	Gateways     []string
-	GatewayGroup string
-	Credential   *session.Credential
-}
-
 func (c *Runtime) dialResolved(ctx context.Context, target resolver.Resolution, port int, network string) (net.Conn, error) {
 	cred, e := c.provider.Credential(ctx)
 	if e != nil {
@@ -373,12 +360,13 @@ func (c *Runtime) dialResolved(ctx context.Context, target resolver.Resolution, 
 	if target.Generation != 0 && target.Generation != cred.Generation {
 		return nil, &Error{Info: ErrorInfo{Kind: ErrorSessionReplaced, Message: "session replaced during resolution"}}
 	}
-	ctx = session.ExpectGeneration(ctx, cred.Generation)
-	plan := RoutePlan{Target: target, Port: port, Network: network, Credential: cred, Gateways: cred.GatewaysForApp(target.AppID), GatewayGroup: cred.GatewayGroupForApp(target.AppID)}
+	ctx, releaseSession := bindSession(ctx, cred)
+	defer releaseSession()
+	gateways := cred.GatewaysForApp(target.AppID)
 	if target.AppID == "" {
 		return nil, ErrDenied
 	}
-	if len(plan.Gateways) == 0 {
+	if len(gateways) == 0 {
 		return nil, tunnel.ErrNoLines
 	}
 	if c.checkTarget != nil {
@@ -403,16 +391,29 @@ func (c *Runtime) dialResolved(ctx context.Context, target resolver.Resolution, 
 		conn.Close()
 		return nil, &Error{Info: ErrorInfo{Kind: ErrorSessionReplaced, Message: "session replaced during dial"}}
 	}
+	return c.ownConnection(cred, conn, network == "udp")
+}
+func (c *Runtime) ownConnection(cred *session.Credential, conn net.Conn, datagram bool) (net.Conn, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.closed {
 		conn.Close()
 		return nil, ErrClosed
 	}
-	owned := &ownedConn{Conn: conn, owner: c, credential: cred, datagram: network == "udp"}
+	if c.provider.Current() != cred {
+		conn.Close()
+		return nil, session.ErrSessionReplaced
+	}
+	owned := &ownedConn{Conn: conn, owner: c, credential: cred, datagram: datagram}
 	c.conns[owned] = struct{}{}
+	if cred.Lifetime != nil {
+		owned.stopMu.Lock()
+		owned.stop = context.AfterFunc(cred.Lifetime, func() { owned.Close() })
+		owned.stopMu.Unlock()
+	}
 	return owned, nil
 }
+
 func (c *Runtime) DialResolved(parent context.Context, t resolver.Resolution, p int, n string) (net.Conn, error) {
 	ctx, done := c.operation(parent)
 	defer done()
@@ -437,7 +438,17 @@ func (c *Runtime) LookupContextHost(parent context.Context, host string) ([]stri
 	if err := c.prepare(ctx); err != nil {
 		return nil, err
 	}
-	return c.resolver.LookupHost(ctx, host)
+	cred, err := c.provider.Credential(ctx)
+	if err != nil {
+		return nil, err
+	}
+	ctx, releaseSession := bindSession(ctx, cred)
+	defer releaseSession()
+	result, err := c.resolver.LookupHost(ctx, host)
+	if c.provider.Current() != cred {
+		return nil, session.ErrSessionReplaced
+	}
+	return result, err
 }
 func (c *Runtime) Close() error {
 	c.mu.Lock()
@@ -457,7 +468,6 @@ func (c *Runtime) Close() error {
 		close(ch)
 		delete(c.subscribers, id)
 	}
-	c.status.State = Closed
 	c.mu.Unlock()
 	for _, conn := range conns {
 		conn.Close()
@@ -478,6 +488,8 @@ type ownedConn struct {
 	credential *session.Credential
 	owner      *Runtime
 	once       sync.Once
+	stopMu     sync.Mutex
+	stop       func() bool
 	err        error
 }
 
@@ -499,7 +511,17 @@ func (c *ownedConn) Write(b []byte) (int, error) {
 	return c.Conn.Write(b)
 }
 func (c *ownedConn) Close() error {
-	c.once.Do(func() { c.err = c.Conn.Close(); c.owner.mu.Lock(); delete(c.owner.conns, c); c.owner.mu.Unlock() })
+	c.once.Do(func() {
+		c.stopMu.Lock()
+		if c.stop != nil {
+			c.stop()
+		}
+		c.stopMu.Unlock()
+		c.err = c.Conn.Close()
+		c.owner.mu.Lock()
+		delete(c.owner.conns, c)
+		c.owner.mu.Unlock()
+	})
 	return c.err
 }
 func (c *ownedConn) CloseWrite() error {
@@ -507,4 +529,34 @@ func (c *ownedConn) CloseWrite() error {
 		return w.CloseWrite()
 	}
 	return errors.New("half-close unavailable")
+}
+
+func sessionInfo(cred *session.Credential) SessionInfo {
+	info := SessionInfo{Gateways: append([]string(nil), cred.Gateways...), DNS: append([]string(nil), cred.DNS...), Generation: cred.Generation, Username: cred.Username, DisplayName: cred.DisplayName}
+	for _, r := range cred.Policy.IPRules {
+		address := ""
+		switch {
+		case r.IP != nil:
+			address = r.IP.String()
+		case r.Net != nil:
+			address = r.Net.String()
+		case r.IPMin != nil:
+			address = r.IPMin.String() + "-" + r.IPMax.String()
+		}
+		info.Resources = append(info.Resources, Resource{Address: address, Protocol: r.Proto, ApplicationID: r.AppID, GatewayGroup: cred.Policy.AppNodeGroups[r.AppID], PortMin: r.Port.Min, PortMax: r.Port.Max})
+	}
+	for _, r := range cred.Policy.DomainRules {
+		info.Resources = append(info.Resources, Resource{Address: r.Domain, Protocol: r.Proto, ApplicationID: r.AppID, GatewayGroup: cred.Policy.AppNodeGroups[r.AppID], PortMin: r.Port.Min, PortMax: r.Port.Max})
+	}
+	for _, r := range cred.Policy.SuffixRules {
+		info.Resources = append(info.Resources, Resource{Address: "*" + r.Suffix, Protocol: r.Proto, ApplicationID: r.AppID, GatewayGroup: cred.Policy.AppNodeGroups[r.AppID], PortMin: r.Port.Min, PortMax: r.Port.Max})
+	}
+	return info
+}
+
+func bindSession(ctx context.Context, cred *session.Credential) (context.Context, func()) {
+	ctx = session.ExpectGeneration(ctx, cred.Generation)
+	ctx, cancel := context.WithCancel(ctx)
+	stop := context.AfterFunc(cred.Lifetime, cancel)
+	return ctx, func() { stop(); cancel() }
 }

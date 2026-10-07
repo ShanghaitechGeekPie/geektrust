@@ -9,6 +9,7 @@ import (
 	"net/http/cookiejar"
 	"net/http/httptest"
 	"net/url"
+	"sync/atomic"
 	"testing"
 )
 
@@ -16,6 +17,11 @@ func TestShanghaiTechLoginAndDurableCounter(t *testing.T) {
 	for _, failSave := range []bool{false, true} {
 		t.Run(fmt.Sprintf("save_failure_%t", failSave), func(t *testing.T) {
 			persisted, submitted := false, false
+			var foreignCalls atomic.Int32
+			service := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				foreignCalls.Add(1)
+			}))
+			defer service.Close()
 			var origin string
 			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch r.URL.Path {
@@ -32,6 +38,7 @@ func TestShanghaiTechLoginAndDurableCounter(t *testing.T) {
 						t.Error("ShanghaiTech form fields changed")
 					}
 					http.SetCookie(w, &http.Cookie{Name: "CASTGC", Value: "synthetic-cookie", Path: "/"})
+					http.Redirect(w, r, service.URL+"/", http.StatusSeeOther)
 				case "/authserver/startAssertion":
 					parsed, _ := url.Parse(origin)
 					options := challengeOptions()
@@ -66,6 +73,9 @@ func TestShanghaiTechLoginAndDurableCounter(t *testing.T) {
 			hc := server.Client()
 			hc.Jar, _ = cookiejar.New(nil)
 			err = NewClient(store, hc).Login(context.Background())
+			if foreignCalls.Load() != 0 {
+				t.Fatal("login followed an external service instead of checking the identity session")
+			}
 			if failSave {
 				if err == nil || submitted {
 					t.Fatal("storage failure did not stop login")

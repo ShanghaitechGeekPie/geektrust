@@ -3,7 +3,6 @@ package runtime
 import (
 	"context"
 	"github.com/ShanghaitechGeekPie/geektrust/internal/resolver"
-	"github.com/ShanghaitechGeekPie/geektrust/internal/sdpc"
 	"github.com/ShanghaitechGeekPie/geektrust/internal/session"
 	"github.com/ShanghaitechGeekPie/geektrust/internal/settings"
 	"net"
@@ -49,7 +48,6 @@ func (c *Runtime) DialUDP(ctx context.Context, ip string, p int, app, domain str
 	}
 	return c.DialContext(ctx, "udp", net.JoinHostPort(host, strconv.Itoa(p)))
 }
-func (c *Runtime) ActiveSDPC() *sdpc.Client { return c.provider.ActiveSDPC() }
 func (c *Runtime) TryForceRelogin() (func(context.Context), bool) {
 	run, ok := c.provider.TryForceRelogin()
 	if !ok {
