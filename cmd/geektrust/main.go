@@ -10,6 +10,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -308,31 +309,70 @@ func printSummary(cred *session.Credential) {
 		len(cred.Policy.DomainRules), len(cred.Policy.SuffixRules), len(cred.Policy.IPRules), len(apps))
 }
 
-// smsPrompt reads the SMS code from stdin whenever the controller demands it.
-var terminalInput struct {
-	once  sync.Once
-	lines chan string
+// terminalCodeInput keeps one reader and buffers the active prompt's first code.
+type terminalCodeInput struct {
+	once   sync.Once
+	mu     sync.Mutex
+	lines  chan string
+	closed bool
 }
 
+var terminalInput terminalCodeInput
+
+// smsPrompt reads the SMS code from stdin whenever the controller demands it.
 func smsPrompt(ctx context.Context) (string, error) {
-	terminalInput.once.Do(func() {
-		terminalInput.lines = make(chan string)
+	return terminalInput.prompt(ctx, os.Stdin, os.Stderr)
+}
+
+func (t *terminalCodeInput) prompt(ctx context.Context, input io.Reader, output io.Writer) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	lines := make(chan string, 1)
+	t.mu.Lock()
+	if t.closed {
+		t.mu.Unlock()
+		return "", errors.New("no verification code provided")
+	}
+	if t.lines != nil {
+		t.mu.Unlock()
+		return "", errors.New("verification input already pending")
+	}
+	t.lines = lines
+	t.mu.Unlock()
+	defer func() {
+		t.mu.Lock()
+		t.lines = nil
+		t.mu.Unlock()
+	}()
+	t.once.Do(func() {
 		go func() {
-			defer close(terminalInput.lines)
-			scan := bufio.NewScanner(os.Stdin)
-			for scan.Scan() {
-				select {
-				case terminalInput.lines <- strings.TrimSpace(scan.Text()):
-				default:
+			defer func() {
+				t.mu.Lock()
+				t.closed = true
+				if t.lines != nil {
+					close(t.lines)
 				}
+				t.mu.Unlock()
+			}()
+			scan := bufio.NewScanner(input)
+			for scan.Scan() {
+				t.mu.Lock()
+				if t.lines != nil {
+					select {
+					case t.lines <- strings.TrimSpace(scan.Text()):
+					default:
+					}
+				}
+				t.mu.Unlock()
 			}
 		}()
 	})
-	fmt.Fprintln(os.Stderr, "The controller requires SMS verification; enter the 6-digit code:")
+	fmt.Fprintln(output, "The controller requires SMS verification; enter the 6-digit code:")
 	select {
 	case <-ctx.Done():
 		return "", ctx.Err()
-	case code, ok := <-terminalInput.lines:
+	case code, ok := <-lines:
 		if !ok || code == "" {
 			return "", errors.New("no verification code provided")
 		}
