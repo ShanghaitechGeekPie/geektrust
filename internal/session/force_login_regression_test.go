@@ -23,6 +23,42 @@ func TestCancelledForceLoginKeepsCurrentSession(t *testing.T) {
 	}
 }
 
+func TestRejectedSessionIsNotRestoredAfterFailedLogin(t *testing.T) {
+	for _, forced := range []bool{false, true} {
+		t.Run(map[bool]string{false: "invalidated", true: "forced"}[forced], func(t *testing.T) {
+			p := newRestoreFixture(t, restoreHandler)
+			ctx := context.Background()
+			current, err := p.Credential(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			rejected := errors.New("fixture identity unavailable")
+			var attempts atomic.Int32
+			p.Authenticate = func(context.Context, *http.Client) (string, error) {
+				attempts.Add(1)
+				return "", rejected
+			}
+			if forced {
+				_, err = p.ForceLogin(ctx)
+			} else {
+				if !p.InvalidateIfCurrent(current) {
+					t.Fatal("current session was not invalidated")
+				}
+				_, err = p.Credential(ctx)
+			}
+			if !errors.Is(err, rejected) {
+				t.Fatalf("first login = %v", err)
+			}
+			if _, err = p.Credential(ctx); !errors.Is(err, rejected) {
+				t.Fatalf("rejected cached session was restored after failed login: %v", err)
+			}
+			if attempts.Load() != 2 {
+				t.Fatalf("authentication attempts = %d, want 2", attempts.Load())
+			}
+		})
+	}
+}
+
 func TestConcurrentForceLoginSharesAuthentication(t *testing.T) {
 	p := failingProvider(t)
 	entered, release := make(chan struct{}), make(chan struct{})

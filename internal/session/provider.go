@@ -91,7 +91,7 @@ type Provider struct {
 	revision      uint64
 	cancelSession context.CancelFunc
 	closed        bool
-	forceLogin    bool // set by Invalidate; skips restore on the next refresh
+	forceLogin    bool // rejected caches stay disabled until a new session is published
 
 	dispMu      sync.Mutex
 	dispCond    *sync.Cond // lazily created on first AddObserver
@@ -271,6 +271,7 @@ func (p *Provider) finishRefresh(call *refreshCall, cred *Credential, session *S
 		err = call.leader.Err()
 	}
 	if err == nil {
+		p.forceLogin = false
 		if p.cancelSession != nil {
 			p.cancelSession()
 		}
@@ -465,8 +466,7 @@ func (p *Provider) CheckLoop(ctx context.Context, interval time.Duration) {
 
 // acquire restores the persisted session or performs a full login. force
 // (relogin reservation) skips restore regardless of the global flag. After
-// Invalidate, the restore step is skipped once: the persisted session is
-// the one the caller rejected.
+// Invalidate, the persisted session stays disabled until a new login succeeds.
 func (p *Provider) acquire(ctx context.Context, force bool) (*Credential, *SessionInfo, bool, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, nil, false, err
@@ -476,8 +476,10 @@ func (p *Provider) acquire(ctx context.Context, force bool) (*Credential, *Sessi
 		p.mu.Unlock()
 		return nil, nil, false, err
 	}
-	skipRestore := force || p.forceLogin
-	p.forceLogin = false
+	if force {
+		p.forceLogin = true
+	}
+	skipRestore := p.forceLogin
 	p.mu.Unlock()
 
 	if !skipRestore {
