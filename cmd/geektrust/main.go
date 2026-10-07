@@ -141,6 +141,9 @@ func cmdLogin(ctx context.Context, cfg *config.Config, logger *slog.Logger, args
 	fs := flag.NewFlagSet("login", flag.ExitOnError)
 	fresh := fs.Bool("fresh", false, "force a full login even if the persisted session is still online")
 	fs.Parse(args)
+	if fs.NArg() != 0 {
+		return errors.New("usage: geektrust login [-fresh]")
+	}
 
 	c, err := commandClient(cfg, logger)
 	if err != nil {
