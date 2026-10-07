@@ -256,7 +256,7 @@ func lookupPort(s string) (int, error) {
 }
 
 func hostsOverlap(a, b string) bool {
-	if a == b {
+	if a == b || a == "" || b == "" {
 		return true
 	}
 	ipA, ipB := listenIP(a), listenIP(b)
