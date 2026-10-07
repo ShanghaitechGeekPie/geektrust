@@ -47,6 +47,9 @@ func (c *Client) CasTicket(ctx context.Context) (string, error) {
 	var shortcutURL *url.URL
 	noFollow := *c.HTTP
 	noFollow.CheckRedirect = func(r *http.Request, via []*http.Request) error {
+		if base.Scheme == "https" && r.URL.Scheme != "https" {
+			return errors.New("cas chain: insecure redirect")
+		}
 		if r.URL.Host == base.Host && r.URL.Scheme == base.Scheme && r.URL.Path == "/portal/shortcut.html" {
 			shortcutURL = r.URL
 			return http.ErrUseLastResponse
@@ -79,8 +82,8 @@ func (c *Client) CasTicket(ctx context.Context) (string, error) {
 	resp.Body.Close()
 
 	if shortcutURL == nil {
-		// Some deployments serve shortcut.html directly as the final 200.
-		if resp.Request != nil && resp.Request.URL.Path == "/portal/shortcut.html" {
+		// Some controllers serve shortcut.html directly as the final 200.
+		if resp.StatusCode == http.StatusOK && resp.Request != nil && resp.Request.URL.Host == base.Host && resp.Request.URL.Scheme == base.Scheme && resp.Request.URL.Path == "/portal/shortcut.html" {
 			shortcutURL = resp.Request.URL
 		}
 	}
