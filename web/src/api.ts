@@ -6,8 +6,8 @@ import { friendlyError, type FriendlyError } from "./errors";
 // Live store. The SSE stream feeds full snapshots; a one-shot /api/status
 // fetch seeds the first paint and is discarded once stream data exists, so a
 // slow fetch can never overwrite fresher data. `connected` mirrors the SSE
-// link so the UI can flag stale data instead of presenting a dead process as
-// "online".
+// freshness so the UI cannot enable actions before a reconnected stream has
+// delivered its current snapshot.
 
 export interface PanelStore {
   snap: Snapshot | null;
@@ -25,13 +25,11 @@ function publish(next: PanelStore) {
   listeners.forEach((l) => l());
 }
 
-function connect() {
+function connect(epoch: number) {
   const es = new EventSource("/api/events");
   stream = es;
-  es.onopen = () => {
-    if (!store.connected) publish({ ...store, connected: true });
-  };
   es.onmessage = (e) => {
+    if (epoch !== streamEpoch) return;
     let snap: Snapshot;
     try {
       snap = JSON.parse(e.data) as Snapshot;
@@ -42,6 +40,7 @@ function connect() {
     publish({ snap, connected: true });
   };
   es.onerror = () => {
+    if (epoch !== streamEpoch) return;
     // EventSource retries the connection itself.
     if (store.connected) publish({ ...store, connected: false });
   };
@@ -64,8 +63,9 @@ function subscribePanel(cb: () => void) {
   listeners.add(cb);
   if (listeners.size === 1) {
     sawStream = false;
-    connect();
-    void seed(++streamEpoch);
+    const epoch = ++streamEpoch;
+    connect(epoch);
+    void seed(epoch);
   }
   return () => {
     listeners.delete(cb);

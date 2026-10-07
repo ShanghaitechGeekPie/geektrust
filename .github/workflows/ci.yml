@@ -20,11 +20,13 @@ jobs:
           cache: true
       - uses: actions/setup-node@v6
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
           cache-dependency-path: web/package-lock.json
       - name: Build panel
         run: npm --prefix web ci && npm --prefix web run build
+      - name: Panel regression tests
+        run: npm --prefix web test
       - name: Unit and integration tests
         run: go test ./...
       - name: Race detector

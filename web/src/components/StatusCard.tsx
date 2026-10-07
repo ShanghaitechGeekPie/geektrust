@@ -1,55 +1,66 @@
-import type { Snapshot } from "../types";
+import { RefreshCw, LoaderCircle, KeyRound } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
 import { friendlyError, type FriendlyError } from "../errors";
+import type { Snapshot } from "../types";
 import { ErrorText } from "./ErrorText";
-
-const STATE_META: Record<string, { label: string; className: string }> = {
-  online: { label: "在线", className: "pill ok" },
-  connecting: { label: "连接中", className: "pill warn" },
-  sms_required: { label: "需要短信验证", className: "pill warn" },
-  offline: { label: "离线", className: "pill idle" },
-};
-
-// stateMeta tolerates unknown states from a newer backend: show them raw
-// instead of mislabeling as offline. `stale` marks a snapshot the panel can
-// no longer refresh — a green "在线" light on a dead process is a lie.
-export function stateMeta(state: string, stale = false): { label: string; className: string } {
-  const meta = STATE_META[state] ?? { label: state, className: "pill idle" };
-  return stale ? { ...meta, className: `${meta.className} stale` } : meta;
-}
-
-export function formatDateTime(iso: string): string {
-  const d = new Date(iso);
-  return Number.isNaN(d.getTime()) ? iso : d.toLocaleString("zh-CN", { hour12: false });
-}
-
-export function StatusCard({ snap, connected, onRelogin, reloginBusy, reloginError }: {
+export function StatusCard({
+  snap,
+  connected,
+  onRelogin,
+  onSMS,
+  reloginBusy,
+  reloginError,
+}: {
   snap: Snapshot;
   connected: boolean;
   onRelogin: () => void;
+  onSMS: () => void;
   reloginBusy: boolean;
   reloginError: FriendlyError | null;
 }) {
-  const meta = stateMeta(snap.state, !connected);
+  const states = {
+    online: ["已连接", "校园资源可通过本地代理访问。"],
+    offline: ["会话已断开", "重新登录以恢复校园资源访问。"],
+    connecting: ["正在连接", "正在建立会话，请稍候。"],
+    sms_required: ["完成验证后连接", "请输入短信验证码，继续本次登录。"],
+  };
+  const [title, description] = states[snap.state] ?? [
+    "状态未知",
+    "等待面板更新连接状态。",
+  ];
+  const working = reloginBusy || snap.state === "connecting";
   return (
-    <section className="card">
-      <h2>状态</h2>
-      <div className="status-row">
-        <span className={meta.className}>{meta.label}</span>
-        <span className="muted">自 {formatDateTime(snap.since)}</span>
+    <Card className="status-card">
+      <div>
+        <h2 className="status-title">{title}</h2>
+        <p className="mt-3 text-sm text-muted-foreground">{description}</p>
       </div>
       {snap.last_error && (
-        <ErrorText error={friendlyError(snap.last_error, "登录失败")} prefix="最近错误：" />
+        <ErrorText error={friendlyError(snap.last_error, "连接失败")} />
       )}
-      {snap.sms_pending && <p className="muted">等待短信验证码，可在弹窗或终端中输入。</p>}
-      <div className="actions">
-        <button
-          onClick={onRelogin}
-          disabled={reloginBusy || !connected || snap.state === "connecting" || snap.state === "sms_required"}
-        >
-          {reloginBusy ? "正在请求…" : "重新登录"}
-        </button>
-      </div>
       {reloginError && <ErrorText error={reloginError} />}
-    </section>
+      <div className="mt-auto flex justify-end pt-5">
+        {snap.sms_pending ? (
+          <Button onClick={onSMS} disabled={!connected}>
+            <KeyRound />
+            输入验证码
+          </Button>
+        ) : (
+          <Button
+            variant="outline"
+            onClick={onRelogin}
+            disabled={!connected || working || snap.state === "sms_required"}
+          >
+            {working ? (
+              <LoaderCircle className="animate-spin" />
+            ) : (
+              <RefreshCw />
+            )}
+            {working ? "连接中…" : "重新登录"}
+          </Button>
+        )}
+      </div>
+    </Card>
   );
 }

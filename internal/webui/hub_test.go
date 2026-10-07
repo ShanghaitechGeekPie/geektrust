@@ -163,3 +163,23 @@ func TestHubDropsSlowSubscriber(t *testing.T) {
 		t.Fatal("slow subscriber was not disconnected")
 	}
 }
+
+func TestHubControllerHostExcludesCredentialsAndPath(t *testing.T) {
+	cfg := testConfig("client")
+	cfg.BaseURL = "https://private:secret@vpn.example.edu.cn:8443/path?ticket=sensitive#fragment"
+	raw := NewHub(cfg).Snapshot()
+	var got struct {
+		ControllerHost string `json:"controller_host"`
+	}
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.ControllerHost != "vpn.example.edu.cn:8443" {
+		t.Fatalf("controller host = %q", got.ControllerHost)
+	}
+	for _, secret := range []string{"private", "secret", "sensitive", "fragment", "/path"} {
+		if strings.Contains(string(raw), secret) {
+			t.Fatalf("snapshot leaked %q", secret)
+		}
+	}
+}

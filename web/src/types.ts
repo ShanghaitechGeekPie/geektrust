@@ -26,6 +26,7 @@ export interface Snapshot {
   user: UserInfo | null;
   device_id: string;
   client_type: string;
+  controller_host: string;
   gateways: string[] | null;
   dns: string[] | null;
   proxy: ProxyInfo;

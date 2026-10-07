@@ -18,13 +18,13 @@ geekTrust 是 aTrust VPN 的纯用户态客户端。它不创建虚拟网卡、�
 
 ## 快速开始
 
-从源码构建需要 Go 1.24+：
+从源码构建需要 Go 1.26.8+：
 
 ```sh
 go build -o geektrust ./cmd/geektrust
 ```
 
-这样构建的二进制可以正常使用，但 Web 面板只显示构建提示页。需要完整面板时，安装 Node 20+ 后执行：
+这样构建的二进制可以正常使用，但 Web 面板只显示构建提示页。需要完整面板时，安装 Node 22.22+ 后执行：
 
 ```sh
 make build
@@ -100,7 +100,7 @@ keystore = "./ids-passkey.keystore"
 
 相对路径以配置文件目录为准。设备身份和加密会话放在平台用户持久目录；上科大必需的网关证书域名由程序提供，证书验证继续开启。普通用户无需填写应用 ID、网关 IP 或协议回退开关。
 
-配置按 `controller`、`auth`、`proxy`、`web`、`dns`、`storage`、`logging` 分组。监听地址省略时采用默认值，空字符串表示禁用。`auth.mode` 支持 `auto`、`client`、`browser`；browser 模式不能绑定授信终端。
+配置按 `controller`、`auth`、`proxy`、`web`、`dns`、`storage`、`logging` 分组。监听地址省略时采用默认值，空字符串表示禁用。`controller.compatibility` 选择 `auto`、`shanghaitech`、`ecnu` 或 `generic`；它用于控制器兼容适配。`auth.mode` 支持 `auto`、`client`、`browser`；browser 模式不能绑定授信终端。
 
 旧格式继续可读，不自动重写。检查和迁移命令：
 

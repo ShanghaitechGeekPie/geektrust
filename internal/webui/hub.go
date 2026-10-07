@@ -6,6 +6,7 @@ package webui
 
 import (
 	"encoding/json"
+	"net/url"
 	"sync"
 	"time"
 
@@ -44,30 +45,32 @@ type proxyInfo struct {
 
 // snapshot is the /api/status and SSE payload (§6.3).
 type snapshot struct {
-	Generation    uint64         `json:"generation"`
-	State         string         `json:"state"`
-	Since         time.Time      `json:"since"`
-	LastError     *string        `json:"last_error"`
-	User          *userInfo      `json:"user"`
-	DeviceID      string         `json:"device_id"`
-	ClientType    string         `json:"client_type"`
-	Gateways      []string       `json:"gateways"`
-	DNS           []string       `json:"dns"`
-	Proxy         proxyInfo      `json:"proxy"`
-	SMSPending    bool           `json:"sms_pending"`
-	SMSGen        uint64         `json:"sms_gen"`
-	EventsDropped uint64         `json:"events_dropped"`
-	Events        []HistoryEvent `json:"events"`
+	Generation     uint64         `json:"generation"`
+	State          string         `json:"state"`
+	Since          time.Time      `json:"since"`
+	LastError      *string        `json:"last_error"`
+	User           *userInfo      `json:"user"`
+	DeviceID       string         `json:"device_id"`
+	ClientType     string         `json:"client_type"`
+	ControllerHost string         `json:"controller_host"`
+	Gateways       []string       `json:"gateways"`
+	DNS            []string       `json:"dns"`
+	Proxy          proxyInfo      `json:"proxy"`
+	SMSPending     bool           `json:"sms_pending"`
+	SMSGen         uint64         `json:"sms_gen"`
+	EventsDropped  uint64         `json:"events_dropped"`
+	Events         []HistoryEvent `json:"events"`
 }
 
 // Hub keeps the live panel state. All mutations happen under mu; snapshots
 // are broadcast after the lock is released... except the marshal is cheap
 // and done under the lock, so subscribers always get a consistent view.
 type Hub struct {
-	mu         sync.Mutex
-	deviceID   string
-	clientType string
-	proxy      proxyInfo
+	mu             sync.Mutex
+	deviceID       string
+	clientType     string
+	controllerHost string
+	proxy          proxyInfo
 
 	acquiring     bool
 	sessionActive bool
@@ -96,6 +99,9 @@ func NewHub(cfg *config.Config) *Hub {
 		state:      StateOffline,
 		since:      time.Now(),
 		subs:       make(map[chan []byte]struct{}),
+	}
+	if controller, err := url.Parse(cfg.BaseURL); err == nil {
+		h.controllerHost = controller.Host
 	}
 	if cfg.Inbound.SOCKS5.Enabled {
 		listen := cfg.Inbound.SOCKS5.Listen
@@ -217,20 +223,21 @@ func (h *Hub) snapshotLocked() snapshot {
 	events := make([]HistoryEvent, len(h.events))
 	copy(events, h.events)
 	return snapshot{
-		Generation:    h.generation,
-		State:         h.state,
-		Since:         h.since,
-		LastError:     h.lastError,
-		User:          h.user,
-		DeviceID:      h.deviceID,
-		ClientType:    h.clientType,
-		Gateways:      h.gateways,
-		DNS:           h.dns,
-		Proxy:         h.proxy,
-		SMSPending:    h.smsPending,
-		SMSGen:        h.smsGen,
-		EventsDropped: h.dropped,
-		Events:        events,
+		Generation:     h.generation,
+		State:          h.state,
+		Since:          h.since,
+		LastError:      h.lastError,
+		User:           h.user,
+		DeviceID:       h.deviceID,
+		ClientType:     h.clientType,
+		ControllerHost: h.controllerHost,
+		Gateways:       h.gateways,
+		DNS:            h.dns,
+		Proxy:          h.proxy,
+		SMSPending:     h.smsPending,
+		SMSGen:         h.smsGen,
+		EventsDropped:  h.dropped,
+		Events:         events,
 	}
 }
 

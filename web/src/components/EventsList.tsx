@@ -1,53 +1,113 @@
+import { useState } from "react";
+import { Card } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+  DialogFooter,
+  DialogClose,
+} from "@/components/ui/dialog";
 import { friendlyError } from "../errors";
 import type { HistoryEvent } from "../types";
-
-const KIND_LABEL: Record<string, string> = {
-  login_start: "开始登录",
-  login_success: "登录成功",
-  restore_success: "恢复会话",
-  login_failed: "登录失败",
-  invalidated: "会话失效",
-};
-
-function formatTime(ts: string): string {
-  const d = new Date(ts);
-  if (Number.isNaN(d.getTime())) return ts;
-  return d.toLocaleString("zh-CN", {
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: false,
-  });
-}
-
-export function EventsList({ events, dropped }: { events: HistoryEvent[]; dropped: number }) {
+function ActivityRows({ events }: { events: HistoryEvent[] }) {
   return (
-    <section className="card">
-      <h2>事件</h2>
-      {dropped > 0 && <p className="muted">另有 {dropped} 条较早的事件未能记录。</p>}
-      {events.length === 0 ? (
-        <p className="muted">暂无事件</p>
+    <ul className="activity-list">
+      {events.map((event, index) => {
+        const date = new Date(event.ts);
+        const color = ["login_success", "restore_success"].includes(event.kind)
+          ? "bg-success"
+          : event.kind === "login_failed"
+            ? "bg-destructive"
+            : event.kind === "interaction_required"
+              ? "bg-warning"
+              : "bg-muted-foreground";
+        const text =
+          event.kind === "login_failed"
+            ? friendlyError(event.message, "登录失败").summary
+            : event.kind === "interaction_required"
+              ? "登录需要验证，请重新登录"
+              : event.message;
+        return (
+          <li key={`${event.ts}-${index}`}>
+            <time dateTime={event.ts} title={event.ts}>
+              {Number.isNaN(date.getTime())
+                ? event.ts
+                : date.toLocaleTimeString("zh-CN", { hour12: false })}
+            </time>
+            <span
+              aria-hidden="true"
+              className={`size-1.5 shrink-0 rounded-full ${color}`}
+            />
+            <span
+              className="min-w-0 break-words"
+              title={text === event.message ? undefined : event.message}
+            >
+              {text}
+            </span>
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+export function EventsList({
+  events,
+  dropped,
+}: {
+  events: HistoryEvent[];
+  dropped: number;
+}) {
+  const [open, setOpen] = useState(false);
+  const newest = [...events].reverse();
+  return (
+    <Card className="activity-card">
+      <div className="flex items-center justify-between gap-3">
+        <h2 className="text-base font-medium">最近活动</h2>
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-muted-foreground">
+            最近 {Math.min(10, events.length)} 条
+          </span>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => setOpen(true)}
+            disabled={!events.length}
+          >
+            查看全部
+          </Button>
+        </div>
+      </div>
+      {events.length ? (
+        <ActivityRows events={newest.slice(0, 10)} />
       ) : (
-        <ul className="events">
-          {[...events].reverse().map((ev, i) => {
-            // Only login_failed carries a wrapped Go error chain; every other
-            // kind is already a plain sentence that must not be rewritten.
-            const text =
-              ev.kind === "login_failed" ? friendlyError(ev.message, "登录失败").summary : ev.message;
-            return (
-              <li key={`${ev.ts}-${events.length - i}`}>
-                <span className="mono muted ev-time">{formatTime(ev.ts)}</span>
-                <span className={`tag kind-${ev.kind}`}>{KIND_LABEL[ev.kind] ?? ev.kind}</span>
-                <span className="ev-msg" title={text === ev.message ? undefined : ev.message}>
-                  {text}
-                </span>
-              </li>
-            );
-          })}
-        </ul>
+        <p className="text-sm text-muted-foreground">暂无活动记录</p>
       )}
-    </section>
+      {dropped > 0 && (
+        <p className="text-xs text-muted-foreground">
+          另有 {dropped} 条事件未能记录。
+        </p>
+      )}
+      <Dialog open={open} onOpenChange={setOpen}>
+        <DialogContent className="activity-dialog">
+          <DialogHeader>
+            <DialogTitle>活动记录</DialogTitle>
+            <DialogDescription>共 {events.length} 条</DialogDescription>
+          </DialogHeader>
+          <div className="min-h-0 overflow-y-auto overscroll-contain pr-2">
+            <ActivityRows events={newest} />
+          </div>
+          <DialogFooter>
+            <DialogClose asChild>
+              <Button variant="outline" className="w-full">
+                关闭
+              </Button>
+            </DialogClose>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </Card>
   );
 }
