@@ -111,6 +111,18 @@ func (r *Resolver) resolve(ctx context.Context, host string, port int, protocol 
 	if err != nil {
 		return Resolution{}, err
 	}
+	if cred.Lifetime != nil {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithCancel(ctx)
+		stop := context.AfterFunc(cred.Lifetime, cancel)
+		defer func() {
+			stop()
+			cancel()
+			if cred.Lifetime.Err() != nil {
+				result, failure = Resolution{}, session.ErrSessionReplaced
+			}
+		}()
+	}
 	defer func() {
 		if failure == nil {
 			result.Generation = cred.Generation
