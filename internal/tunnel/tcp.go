@@ -361,6 +361,10 @@ func readTCPProtocolResponse(reader io.Reader) error {
 	if _, err := io.ReadFull(reader, body); err != nil {
 		return fmt.Errorf("direct TCP protocol response: %w", err)
 	}
+	return parseTCPProtocolResponse(body)
+}
+
+func parseTCPProtocolResponse(body []byte) error {
 	if string(body) == "OK" {
 		return nil
 	}
@@ -416,9 +420,11 @@ type tcpTunnelConn struct {
 	conn   net.Conn
 	reader *bufio.Reader
 
-	readMu  sync.Mutex
-	readBuf []byte
-	writeMu sync.Mutex
+	readMu        sync.Mutex
+	readRemaining int
+	readControl   []byte
+	readClosed    bool
+	writeMu       sync.Mutex
 	// writeClosed is protected by writeMu. The protocol close frame half-closes
 	// the target write direction while the TLS connection remains readable.
 	writeClosed   bool
@@ -434,48 +440,66 @@ func (c *tcpTunnelConn) Read(p []byte) (int, error) {
 	}
 	c.readMu.Lock()
 	defer c.readMu.Unlock()
-	if len(c.readBuf) > 0 {
-		n := copy(p, c.readBuf)
-		c.readBuf = c.readBuf[n:]
-		return n, nil
+	if c.readClosed {
+		return 0, io.EOF
 	}
 	for {
-		var header [2]byte
-		if _, err := io.ReadFull(c.reader, header[:]); err != nil {
+		if c.readControl != nil {
+			offset := len(c.readControl) - c.readRemaining
+			n, err := io.ReadFull(c.reader, c.readControl[offset:])
+			c.readRemaining -= n
+			if err != nil {
+				if err == io.EOF && c.readRemaining > 0 {
+					err = io.ErrUnexpectedEOF
+				}
+				return 0, err
+			}
+			err = parseTCPProtocolResponse(c.readControl)
+			c.readControl = nil
+			if err != nil {
+				return 0, err
+			}
+			continue
+		}
+		if c.readRemaining > 0 {
+			n, err := c.reader.Read(p[:min(len(p), c.readRemaining)])
+			c.readRemaining -= n
+			if err == io.EOF && c.readRemaining > 0 {
+				err = io.ErrUnexpectedEOF
+			}
+			return n, err
+		}
+		// Peek retains a partial header across a retryable read timeout.
+		header, err := c.reader.Peek(2)
+		if err != nil {
+			if err == io.EOF && len(header) > 0 {
+				err = io.ErrUnexpectedEOF
+			}
 			return 0, err
 		}
-		switch header {
+		kind := [2]byte{header[0], header[1]}
+		if kind != [2]byte{0x01, 0x00} && kind != [2]byte{0x01, 0x01} && kind != [2]byte{0x53, 0x00} {
+			return 0, fmt.Errorf("unexpected direct TCP frame 0x%02x 0x%02x", header[0], header[1])
+		}
+		header, err = c.reader.Peek(4)
+		if err != nil {
+			if err == io.EOF {
+				err = io.ErrUnexpectedEOF
+			}
+			return 0, err
+		}
+		switch kind {
 		case [2]byte{0x01, 0x00}:
-			var length [2]byte
-			if _, err := io.ReadFull(c.reader, length[:]); err != nil {
-				return 0, err
-			}
-			frameLength := int(binary.BigEndian.Uint16(length[:]))
-			if frameLength == 0 {
-				continue
-			}
-			if frameLength <= len(p) {
-				return io.ReadFull(c.reader, p[:frameLength])
-			}
-			data := make([]byte, frameLength)
-			if _, err := io.ReadFull(c.reader, data); err != nil {
-				return 0, err
-			}
-			n := copy(p, data)
-			c.readBuf = data[n:]
-			return n, nil
+			c.readRemaining = int(binary.BigEndian.Uint16(header[2:4]))
+			c.reader.Discard(4)
 		case [2]byte{0x01, 0x01}:
-			var trailer [2]byte
-			if _, err := io.ReadFull(c.reader, trailer[:]); err != nil {
-				return 0, err
-			}
+			c.reader.Discard(4)
+			c.readClosed = true
 			return 0, io.EOF
 		case [2]byte{0x53, 0x00}:
-			if err := readTCPProtocolResponse(c.reader); err != nil {
-				return 0, err
-			}
-		default:
-			return 0, fmt.Errorf("unexpected direct TCP frame 0x%02x 0x%02x", header[0], header[1])
+			c.readRemaining = int(binary.BigEndian.Uint16(header[2:4]))
+			c.readControl = make([]byte, c.readRemaining)
+			c.reader.Discard(4)
 		}
 	}
 }
@@ -496,8 +520,12 @@ func (c *tcpTunnelConn) Write(p []byte) (int, error) {
 		frame[0], frame[1] = 0x01, 0x00
 		binary.BigEndian.PutUint16(frame[2:4], uint16(size))
 		copy(frame[4:], p[:size])
-		if err := writeTCPFrame(c.conn, frame); err != nil {
-			return written, err
+		n, err := writeTCPFrame(c.conn, frame)
+		if err != nil {
+			// A partial frame cannot be resumed with a new header.
+			c.writeClosed, c.closeWriteErr = true, err
+			c.conn.Close()
+			return written + max(0, n-4), err
 		}
 		written += size
 		p = p[size:]
@@ -505,20 +533,22 @@ func (c *tcpTunnelConn) Write(p []byte) (int, error) {
 	return written, nil
 }
 
-func writeTCPFrame(w io.Writer, frame []byte) error {
+func writeTCPFrame(w io.Writer, frame []byte) (int, error) {
+	written := 0
 	for len(frame) > 0 {
 		n, err := w.Write(frame)
 		if n > 0 {
+			written += n
 			frame = frame[n:]
 		}
 		if err != nil {
-			return err
+			return written, err
 		}
 		if n == 0 {
-			return io.ErrNoProgress
+			return written, io.ErrNoProgress
 		}
 	}
-	return nil
+	return written, nil
 }
 
 // CloseWrite sends the stream close frame without closing the TLS socket, so
@@ -526,18 +556,31 @@ func writeTCPFrame(w io.Writer, frame []byte) error {
 func (c *tcpTunnelConn) CloseWrite() error {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
+	return c.closeWriteLocked()
+}
+
+func (c *tcpTunnelConn) closeWriteLocked() error {
 	if c.writeClosed {
 		return c.closeWriteErr
 	}
 	c.writeClosed = true
 	_ = c.conn.SetWriteDeadline(time.Now().Add(tcpCloseTimeout))
-	c.closeWriteErr = writeTCPFrame(c.conn, []byte{0x01, 0x01, 0x00, 0x00})
+	_, c.closeWriteErr = writeTCPFrame(c.conn, []byte{0x01, 0x01, 0x00, 0x00})
+	if c.closeWriteErr != nil {
+		c.conn.Close()
+	}
 	return c.closeWriteErr
 }
 
 func (c *tcpTunnelConn) Close() error {
 	c.closeOnce.Do(func() {
-		writeErr := c.CloseWrite()
+		// Close must unblock a Write waiting on the socket. Send a graceful
+		// close frame only when no writer currently owns the framed stream.
+		var writeErr error
+		if c.writeMu.TryLock() {
+			writeErr = c.closeWriteLocked()
+			c.writeMu.Unlock()
+		}
 		closeErr := c.conn.Close()
 		if writeErr != nil {
 			c.closeErr = writeErr
