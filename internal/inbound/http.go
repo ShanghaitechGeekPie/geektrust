@@ -103,8 +103,18 @@ func (s *Server) handleHTTPConnectUDP(ctx context.Context, client net.Conn, br *
 		return
 	}
 
+	ctx, stop := context.WithCancel(ctx)
+	defer stop()
+	upgraded := make(chan struct{})
 	var writeMu sync.Mutex
 	table := newUDPFlowTable(ctx, s, 1, func(_ udpTarget, payload []byte) error {
+		// A remote peer can send data as soon as the UDP flow opens.
+		// Capsules must wait until the HTTP upgrade response is complete.
+		select {
+		case <-upgraded:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 		writeMu.Lock()
 		err := writeDatagramCapsule(client, payload)
 		writeMu.Unlock()
@@ -131,6 +141,7 @@ func (s *Server) handleHTTPConnectUDP(ctx context.Context, client net.Conn, br *
 		return
 	}
 	_ = client.SetDeadline(time.Time{})
+	close(upgraded)
 	s.logger.Info("http CONNECT-UDP", "target", target.key())
 
 	for {
