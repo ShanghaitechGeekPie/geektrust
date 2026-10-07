@@ -116,6 +116,11 @@ func unzip(archivePath, destination string) error {
 	if err := os.MkdirAll(destination, 0o755); err != nil {
 		return err
 	}
+	root, err := os.OpenRoot(destination)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
 	archive, err := zip.OpenReader(archivePath)
 	if err != nil {
 		return err
@@ -128,22 +133,21 @@ func unzip(archivePath, destination string) error {
 			strings.HasPrefix(name, ".."+string(filepath.Separator)) {
 			return fmt.Errorf("unsafe archive path: %q", entry.Name)
 		}
-		target := filepath.Join(destination, name)
 		mode := entry.Mode()
 		switch {
 		case mode.IsDir():
-			if err := os.MkdirAll(target, mode.Perm()); err != nil {
+			if err := root.MkdirAll(name, mode.Perm()); err != nil {
 				return err
 			}
 		case mode.IsRegular():
-			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			if err := root.MkdirAll(filepath.Dir(name), 0o755); err != nil {
 				return err
 			}
 			reader, err := entry.Open()
 			if err != nil {
 				return err
 			}
-			writer, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode.Perm())
+			writer, err := root.OpenFile(name, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode.Perm())
 			if err != nil {
 				reader.Close()
 				return err
