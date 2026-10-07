@@ -7,6 +7,7 @@ import (
 	"github.com/BurntSushi/toml"
 	public "github.com/ShanghaitechGeekPie/geektrust/compatibility"
 	defaults "github.com/ShanghaitechGeekPie/geektrust/internal/compatibility"
+	"github.com/ShanghaitechGeekPie/geektrust/internal/privatefile"
 	"github.com/ShanghaitechGeekPie/geektrust/internal/storage"
 	"net"
 	"net/url"
@@ -49,8 +50,9 @@ type FileV2 struct {
 		Servers  []string `toml:"servers"`
 	} `toml:"dns"`
 	Storage struct {
-		Directory string `toml:"directory"`
-		StateFile string `toml:"state_file"`
+		Directory         string `toml:"directory"`
+		StateFile         string `toml:"state_file"`
+		StrictPermissions bool   `toml:"strict_permissions"`
 	} `toml:"storage"`
 	Logging struct {
 		Level string `toml:"level"`
@@ -135,7 +137,11 @@ func loadV2(path string, data []byte) (*Config, error) {
 	}
 	id := f.Auth.DeviceID
 	if id == "" {
-		b, e := os.ReadFile(filepath.Join(directory, "device_id"))
+		identityPath := filepath.Join(directory, "device_id")
+		if e := privatefile.Check(identityPath, f.Storage.StrictPermissions); e != nil {
+			return nil, e
+		}
+		b, e := os.ReadFile(identityPath)
 		if e == nil {
 			id = strings.TrimSpace(string(b))
 		} else if !errors.Is(e, os.ErrNotExist) {
@@ -143,6 +149,7 @@ func loadV2(path string, data []byte) (*Config, error) {
 		}
 	}
 	cfg := &Config{Version: 2, Directory: directory, DeviceID: id, Keystore: resolve(f.Auth.Passkey.Keystore), BaseURL: strings.TrimRight(f.Controller.URL, "/"), Platform: v.Platform, Compatibility: profile, ClientType: mode, LoginDomain: f.Auth.LoginDomain, Fallbacks: v.Fallbacks, GatewayTLSName: v.GatewayServerName, StateFile: filepath.Join(directory, "session.enc"), DNS: append([]string(nil), f.DNS.Servers...), DNSStrategy: f.DNS.Strategy, LogLevel: f.Logging.Level}
+	cfg.StrictPermissions = f.Storage.StrictPermissions
 	if cfg.DNSStrategy == "" {
 		cfg.DNSStrategy = "auto"
 	}
@@ -240,7 +247,10 @@ func (c *Config) EnsureDeviceID() error {
 		return e
 	}
 	p := filepath.Join(c.Directory, "device_id")
-	if e = storage.CreateExclusive(p, []byte(id+"\n")); errors.Is(e, os.ErrExist) {
+	if e = storage.CreateExclusive(p, []byte(id+"\n"), c.StrictPermissions); errors.Is(e, os.ErrExist) {
+		if e := privatefile.Check(p, c.StrictPermissions); e != nil {
+			return e
+		}
 		b, e := os.ReadFile(p)
 		if e != nil {
 			return e
@@ -283,6 +293,7 @@ func Migration(path string) ([]byte, error) {
 		return nil, e
 	}
 	f.Storage.StateFile, e = filepath.Abs(c.StateFile)
+	f.Storage.StrictPermissions = c.StrictPermissions
 	if e != nil {
 		return nil, e
 	}

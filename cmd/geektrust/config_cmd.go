@@ -32,7 +32,7 @@ func cmdConfig(path string, args []string) error {
 			fmt.Println("configuration valid")
 			return nil
 		}
-		fmt.Printf("config_version = %d\ncontroller = %q\ncompatibility = %q\nauth_mode = %q\ndns_strategy = %q\nkeystore = %q\nstate_file = %q\n", c.Version, c.BaseURL, c.Compatibility, c.ClientType, c.DNSStrategy, c.Keystore, c.StateFile)
+		fmt.Printf("config_version = %d\ncontroller = %q\ncompatibility = %q\nauth_mode = %q\ndns_strategy = %q\nkeystore = %q\nstate_file = %q\nstrict_permissions = %t\n", c.Version, c.BaseURL, c.Compatibility, c.ClientType, c.DNSStrategy, c.Keystore, c.StateFile, c.StrictPermissions)
 		return nil
 	case "migrate":
 		fs := flag.NewFlagSet("config migrate", flag.ContinueOnError)
@@ -51,18 +51,22 @@ func cmdConfig(path string, args []string) error {
 			fmt.Print(string(b))
 			return nil
 		}
+		cfg, e := config.Load(path)
+		if e != nil {
+			return e
+		}
 		old, e := os.ReadFile(path)
 		if e != nil {
 			return e
 		}
-		if e = storage.CreateExclusive(path+".v1.bak", old); e != nil {
+		if e = storage.CreateExclusive(path+".v1.bak", old, cfg.StrictPermissions); e != nil {
 			return fmt.Errorf("create migration backup: %w", e)
 		}
-		if e = storage.WriteAtomic(path, b, 0600); e != nil {
+		if e = storage.WriteAtomic(path, b, cfg.StrictPermissions); e != nil {
 			return e
 		}
 		if _, e = config.Load(path); e != nil {
-			_ = storage.WriteAtomic(path, old, 0600)
+			_ = storage.WriteAtomic(path, old, cfg.StrictPermissions)
 			return e
 		}
 		fmt.Println("configuration migrated; original retained in " + path + ".v1.bak")

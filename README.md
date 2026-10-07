@@ -102,6 +102,8 @@ keystore = "./ids-passkey.keystore"
 
 配置按 `controller`、`auth`、`proxy`、`web`、`dns`、`storage`、`logging` 分组。监听地址省略时采用默认值，空字符串表示禁用。`controller.compatibility` 选择 `auto`、`shanghaitech`、`ecnu` 或 `generic`；它用于控制器兼容适配。`auth.mode` 支持 `auto`、`client`、`browser`；browser 模式不能绑定授信终端。
 
+文件权限检查和设置问题默认输出英文警告。在 `[storage]` 中设置 `strict_permissions = true` 后，这些问题会阻止操作。新文件仍会尝试设置私有权限；文件内容的格式校验始终保留，实际读写失败仍会报错。旧格式使用顶层 `strict_permissions`，迁移时会保留该设置。
+
 旧格式继续可读，不自动重写。检查和迁移命令：
 
 ```sh

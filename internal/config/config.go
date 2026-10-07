@@ -14,6 +14,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 
+	"github.com/ShanghaitechGeekPie/geektrust/internal/privatefile"
 	"github.com/ShanghaitechGeekPie/geektrust/internal/settings"
 )
 
@@ -30,13 +31,14 @@ const DefaultWebListen = "127.0.0.1:8081"
 
 // Config is the top-level configuration.
 type Config struct {
-	UnknownFields []string       `toml:"-"`
-	Version       int            `toml:"-"`
-	Compatibility public.Profile `toml:"-"`
-	DNSStrategy   string         `toml:"-"`
-	Directory     string         `toml:"-"`
-	CAFile        string         `toml:"-"`
-	AppID         string         `toml:"app_id"`
+	UnknownFields     []string       `toml:"-"`
+	Version           int            `toml:"-"`
+	Compatibility     public.Profile `toml:"-"`
+	DNSStrategy       string         `toml:"-"`
+	Directory         string         `toml:"-"`
+	CAFile            string         `toml:"-"`
+	AppID             string         `toml:"app_id"`
+	StrictPermissions bool           `toml:"strict_permissions"`
 
 	Fallbacks      public.Fallbacks `toml:"-"`
 	GatewayTLSName string           `toml:"-"`
@@ -96,7 +98,11 @@ func Load(path string) (*Config, error) {
 		if header.Version != 2 {
 			return nil, fmt.Errorf("unsupported config_version %d", header.Version)
 		}
-		return loadV2(path, data)
+		cfg, err := loadV2(path, data)
+		if err != nil {
+			return nil, err
+		}
+		return cfg, cfg.checkPermissions(path)
 	}
 	var cfg Config
 	meta, err := toml.Decode(string(data), &cfg)
@@ -121,7 +127,20 @@ func Load(path string) (*Config, error) {
 	if err := cfg.validate(); err != nil {
 		return nil, fmt.Errorf("config %s: %w", path, err)
 	}
-	return &cfg, nil
+	return &cfg, cfg.checkPermissions(path)
+}
+
+func (c *Config) checkPermissions(path string) error {
+	paths := []string{path, c.Keystore, c.StateFile, c.StateFile + ".key"}
+	for _, p := range paths {
+		if p == "" {
+			continue
+		}
+		if err := privatefile.Check(p, c.StrictPermissions); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (c *Config) applyDefaults() {

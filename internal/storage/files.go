@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 )
 
-func WriteAtomic(path string, data []byte, mode os.FileMode) error {
+func WriteAtomic(path string, data []byte, strict bool) error {
 	dir := filepath.Dir(path)
 	if e := os.MkdirAll(dir, 0700); e != nil {
 		return e
@@ -19,15 +19,11 @@ func WriteAtomic(path string, data []byte, mode os.FileMode) error {
 	}
 	name := f.Name()
 	defer os.Remove(name)
-	if e = privatefile.Protect(name); e != nil {
+	if e = privatefile.Protect(name, strict); e != nil {
 		f.Close()
 		return e
 	}
 	if _, e = f.Write(data); e != nil {
-		f.Close()
-		return e
-	}
-	if e = f.Chmod(mode); e != nil {
 		f.Close()
 		return e
 	}
@@ -43,7 +39,7 @@ func WriteAtomic(path string, data []byte, mode os.FileMode) error {
 	}
 	return syncDirectory(dir)
 }
-func CreateExclusive(path string, data []byte) error {
+func CreateExclusive(path string, data []byte, strict bool) error {
 	dir := filepath.Dir(path)
 	if e := os.MkdirAll(dir, 0700); e != nil {
 		return e
@@ -54,7 +50,7 @@ func CreateExclusive(path string, data []byte) error {
 	}
 	name := f.Name()
 	defer os.Remove(name)
-	if e = privatefile.Protect(name); e != nil {
+	if e = privatefile.Protect(name, strict); e != nil {
 		f.Close()
 		return e
 	}
@@ -75,21 +71,27 @@ func CreateExclusive(path string, data []byte) error {
 	return syncDirectory(dir)
 }
 
-type CredentialFile string
+type CredentialFile struct {
+	Path              string
+	StrictPermissions bool
+}
 
 func (p CredentialFile) Load(ctx context.Context) ([]byte, error) {
 	if e := ctx.Err(); e != nil {
 		return nil, e
 	}
-	return os.ReadFile(string(p))
+	if e := privatefile.Check(p.Path, p.StrictPermissions); e != nil {
+		return nil, e
+	}
+	return os.ReadFile(p.Path)
 }
 func (p CredentialFile) Save(ctx context.Context, b []byte) error {
 	if e := ctx.Err(); e != nil {
 		return e
 	}
-	target, e := filepath.EvalSymlinks(string(p))
+	target, e := filepath.EvalSymlinks(p.Path)
 	if e != nil {
 		return e
 	}
-	return WriteAtomic(target, b, 0600)
+	return WriteAtomic(target, b, p.StrictPermissions)
 }

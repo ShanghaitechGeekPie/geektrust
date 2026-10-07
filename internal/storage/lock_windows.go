@@ -10,7 +10,7 @@ import (
 )
 
 func (p CredentialFile) Lock(ctx context.Context) (func(), error) {
-	canonical, e := filepath.EvalSymlinks(string(p))
+	canonical, e := filepath.EvalSymlinks(p.Path)
 	if e != nil {
 		return nil, e
 	}

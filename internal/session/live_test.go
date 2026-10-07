@@ -28,7 +28,7 @@ func TestECNULiveSession(t *testing.T) {
 	}
 	cfg := &config.Config{Keystore: path, BaseURL: "https://vpn.ecnu.edu.cn", Platform: "Mac", ClientType: "browser", DeviceID: device}
 	p := NewProvider(cfg.SessionOptions(), slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
-	identity, err := auth.NewPasskey(storage.CredentialFile(path))
+	identity, err := auth.NewPasskey(storage.CredentialFile{Path: path})
 	if err != nil {
 		t.Fatal(err)
 	}

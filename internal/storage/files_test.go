@@ -15,15 +15,15 @@ func TestExclusivePublicationAndCredentialLock(t *testing.T) {
 	var wg sync.WaitGroup
 	for i := 0; i < 8; i++ {
 		wg.Add(1)
-		go func() { defer wg.Done(); _ = CreateExclusive(p, []byte("complete identity")) }()
+		go func() { defer wg.Done(); _ = CreateExclusive(p, []byte("complete identity"), true) }()
 	}
 	wg.Wait()
 	b, e := os.ReadFile(p)
 	if e != nil || string(b) != "complete identity" {
 		t.Fatal("partially published exclusive file")
 	}
-	key := CredentialFile(filepath.Join(dir, "credential"))
-	if e = WriteAtomic(string(key), []byte("fixture"), 0600); e != nil {
+	key := CredentialFile{Path: filepath.Join(dir, "credential"), StrictPermissions: true}
+	if e = WriteAtomic(key.Path, []byte("fixture"), true); e != nil {
 		t.Fatal(e)
 	}
 	unlock, e := key.Lock(context.Background())

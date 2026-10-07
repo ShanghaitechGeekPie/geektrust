@@ -14,10 +14,11 @@ import (
 	"os"
 	"time"
 
+	"github.com/ShanghaitechGeekPie/geektrust/internal/privatefile"
 	"github.com/ShanghaitechGeekPie/geektrust/internal/storage"
 )
 
-// State is the persisted session (encrypted, 0600).
+// State is the persisted encrypted session.
 type State struct {
 	Version         int    `json:"version"`
 	ControllerURL   string `json:"controller_url"`
@@ -46,16 +47,17 @@ type CookieRecord struct {
 	Value string `json:"value"`
 }
 
-// Store encrypts State with AES-256-GCM under a random key kept in a sibling
-// 0600 key file (<state_file>.key). The key is generated on first save; both
-// files together protect credentials at rest while staying fully automatic
-// (no passphrase to type).
+// Store encrypts State with AES-256-GCM under a random sibling key file.
+// File permission problems warn by default or fail when strict mode is enabled.
 type Store struct {
-	path string
+	path              string
+	strictPermissions bool
 }
 
 // NewStore creates a Store for the given state file path.
-func NewStore(path string) *Store { return &Store{path: path} }
+func NewStore(path string, strictPermissions bool) *Store {
+	return &Store{path: path, strictPermissions: strictPermissions}
+}
 
 func (s *Store) keyPath() string { return s.path + ".key" }
 
@@ -85,6 +87,9 @@ func (s *Store) LoadBytes(ctx context.Context) ([]byte, error) {
 	if e := ctx.Err(); e != nil {
 		return nil, e
 	}
+	if e := privatefile.Check(s.path, s.strictPermissions); e != nil {
+		return nil, e
+	}
 	sealed, e := os.ReadFile(s.path)
 	if errors.Is(e, os.ErrNotExist) {
 		return nil, nil
@@ -110,7 +115,7 @@ func (s *Store) SaveBytes(ctx context.Context, b []byte) error {
 	if e != nil {
 		return e
 	}
-	return storage.WriteAtomic(s.path, sealed, 0600)
+	return storage.WriteAtomic(s.path, sealed, s.strictPermissions)
 }
 func (s *Store) Delete(ctx context.Context) error {
 	if e := ctx.Err(); e != nil {
@@ -125,6 +130,9 @@ func (s *Store) Delete(ctx context.Context) error {
 
 func (s *Store) readKey() ([]byte, error) {
 	path := s.keyPath()
+	if err := privatefile.Check(path, s.strictPermissions); err != nil {
+		return nil, err
+	}
 	key, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
@@ -147,7 +155,7 @@ func (s *Store) loadOrCreateKey() ([]byte, error) {
 	if _, e = rand.Read(key); e != nil {
 		return nil, e
 	}
-	if e = storage.CreateExclusive(s.keyPath(), key); errors.Is(e, os.ErrExist) {
+	if e = storage.CreateExclusive(s.keyPath(), key, s.strictPermissions); errors.Is(e, os.ErrExist) {
 		return s.readKey()
 	} else if e != nil {
 		return nil, e

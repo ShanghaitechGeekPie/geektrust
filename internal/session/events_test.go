@@ -174,7 +174,7 @@ func newRestoreFixture(t *testing.T, handler http.HandlerFunc) *Provider {
 
 	dir := t.TempDir()
 	statePath := filepath.Join(dir, "state.enc")
-	if err := NewStore(statePath).Save(context.Background(), &State{
+	if err := NewStore(statePath, false).Save(context.Background(), &State{
 		ControllerURL: srv.URL, Username: "u1",
 		SID:        "synthetic-sid",
 		DeviceID:   testDeviceID,
@@ -185,7 +185,7 @@ func newRestoreFixture(t *testing.T, handler http.HandlerFunc) *Provider {
 		t.Fatal(err)
 	}
 	p := NewProvider(settings.Session{DeviceID: testDeviceID, BaseURL: srv.URL, Platform: "Mac", ClientType: "browser", Gateways: []string{"192.0.2.1:441"}, LegacyGatewayOverride: true}, testLogger(), nil)
-	p.SetStore(NewStore(statePath))
+	p.SetStore(NewStore(statePath, false))
 	p.Authenticate = func(context.Context, *http.Client) (string, error) {
 		return "", errors.New("fixture full login disabled")
 	}

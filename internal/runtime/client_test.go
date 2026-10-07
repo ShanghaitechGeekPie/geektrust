@@ -79,7 +79,7 @@ func TestECNULiveAccess(t *testing.T) {
 		t.Skip("explicit live credential required")
 	}
 	id, _ := NewDeviceID()
-	identity, err := auth.NewPasskey(storage.CredentialFile(path))
+	identity, err := auth.NewPasskey(storage.CredentialFile{Path: path})
 	if err != nil {
 		t.Fatal(err)
 	}

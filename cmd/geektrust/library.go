@@ -24,7 +24,7 @@ func commandClient(cfg *config.Config, logger *slog.Logger) (*runtime.Runtime, e
 	if e := cfg.EnsureDeviceID(); e != nil {
 		return nil, e
 	}
-	identity, e := auth.NewPasskey(storage.CredentialFile(cfg.Keystore))
+	identity, e := auth.NewPasskey(storage.CredentialFile{Path: cfg.Keystore, StrictPermissions: cfg.StrictPermissions})
 	if e != nil {
 		return nil, e
 	}
@@ -33,7 +33,7 @@ func commandClient(cfg *config.Config, logger *slog.Logger) (*runtime.Runtime, e
 			return "", auth.ErrUnsupported
 		}
 		return smsPrompt(ctx)
-	}}, Compatibility: compatibility.Options{Profile: cfg.Compatibility, Protocol: compatibility.ProtocolOptions{ControllerPlatform: cfg.Platform}, Fallbacks: &cfg.Fallbacks}, SessionStore: commandSessionStore{session.NewStore(cfg.StateFile)}}
+	}}, Compatibility: compatibility.Options{Profile: cfg.Compatibility, Protocol: compatibility.ProtocolOptions{ControllerPlatform: cfg.Platform}, Fallbacks: &cfg.Fallbacks}, SessionStore: commandSessionStore{session.NewStore(cfg.StateFile, cfg.StrictPermissions)}}
 	if cfg.ClientType == "client" {
 		o.Auth.Mode = runtime.DesktopMode
 	}

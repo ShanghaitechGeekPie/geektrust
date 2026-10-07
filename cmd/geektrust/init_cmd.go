@@ -140,7 +140,7 @@ func bindPasskeyKeystore(ctx context.Context, uvx, destination string) error {
 			_ = os.Remove(tmpPath)
 		}
 	}()
-	if err := privatefile.Protect(tmpPath); err != nil {
+	if err := privatefile.Protect(tmpPath, false); err != nil {
 		_ = tmp.Close()
 		return fmt.Errorf("secure temporary keystore: %w", err)
 	}
@@ -163,7 +163,7 @@ func bindPasskeyKeystore(ctx context.Context, uvx, destination string) error {
 	if err != nil || !info.Mode().IsRegular() || info.Size() == 0 {
 		return fmt.Errorf("passkey binding completed without creating a valid keystore")
 	}
-	if err := privatefile.Protect(tmpPath); err != nil {
+	if err := privatefile.Protect(tmpPath, false); err != nil {
 		return fmt.Errorf("secure bound keystore: %w", err)
 	}
 	// Linking within the same directory installs the completed file

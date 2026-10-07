@@ -147,7 +147,7 @@ func writeConfigFile(path string, data []byte, force bool) error {
 	}
 	tmpPath := tmp.Name()
 	defer os.Remove(tmpPath)
-	if err := privatefile.Protect(tmpPath); err != nil {
+	if err := privatefile.Protect(tmpPath, false); err != nil {
 		_ = tmp.Close()
 		return fmt.Errorf("secure temporary config: %w", err)
 	}
@@ -161,7 +161,7 @@ func writeConfigFile(path string, data []byte, force bool) error {
 }
 
 func writeAndClose(f *os.File, data []byte) error {
-	if err := privatefile.Protect(f.Name()); err != nil {
+	if err := privatefile.Protect(f.Name(), false); err != nil {
 		f.Close()
 		return err
 	}

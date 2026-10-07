@@ -78,7 +78,7 @@ func TestRestoreSkipsDifferentClientType(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			statePath := filepath.Join(t.TempDir(), "state.enc")
-			store := NewStore(statePath)
+			store := NewStore(statePath, false)
 			const deviceID = "0123456789ABCDEF0123456789ABCDEF"
 			if err := store.Save(context.Background(), &State{
 				ControllerURL: "http://127.0.0.1:1",
@@ -139,7 +139,7 @@ func TestStoreReadPreservesExistingPermissions(t *testing.T) {
 	if err := os.WriteFile(keyPath, key, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	st := NewStore(filepath.Join(dir, "state.enc"))
+	st := NewStore(filepath.Join(dir, "state.enc"), false)
 	if err := st.Save(context.Background(), &State{SID: "s"}); err != nil {
 		t.Fatal(err)
 	}
@@ -161,9 +161,9 @@ func TestStoreReadPreservesExistingPermissions(t *testing.T) {
 // and creation, the existing key wins (O_EXCL path).
 func TestStoreReusesExistingKey(t *testing.T) {
 	dir := t.TempDir()
-	st := NewStore(filepath.Join(dir, "state.enc"))
+	st := NewStore(filepath.Join(dir, "state.enc"), false)
 	// Simulate the winner: create the key first.
-	winner := NewStore(filepath.Join(dir, "state.enc"))
+	winner := NewStore(filepath.Join(dir, "state.enc"), false)
 	if err := winner.Save(context.Background(), &State{SID: "winner"}); err != nil {
 		t.Fatal(err)
 	}

@@ -30,6 +30,7 @@ keystore = "./ids-passkey.keystore"
 # [storage]
 # directory = ""     # 缺省使用平台用户私有持久目录
 # state_file = ""    # 留空使用 directory/session.enc；非空覆盖会话文件读写路径
+# strict_permissions = false # 权限问题默认只警告；设为 true 时拒绝权限不合格的文件
 
 # [logging]
 # level = "info"
