@@ -1,7 +1,6 @@
 name: Release
 
 on:
-  pull_request:
   push:
     tags:
       - "v*"
@@ -34,12 +33,12 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v6
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
           cache-dependency-path: web/package-lock.json
 
       - name: Check release scripts
-        run: bash -n scripts/package-release.sh scripts/package-release-uv.sh
+        run: bash -n scripts/package-release.sh scripts/package-release-uv.sh scripts/release-targets.sh
 
       - name: Build release packages
         env:
@@ -48,11 +47,19 @@ jobs:
 
       - name: Test
         run: |
+          npm --prefix web test
           go test ./...
           go vet ./...
 
       - name: Verify release checksums
         run: cd dist && sha256sum --check SHA256SUMS
+      - name: Save verified packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: verified-release
+          path: dist/*
+          if-no-files-found: error
+
 
   release:
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
@@ -63,27 +70,14 @@ jobs:
     timeout-minutes: 30
 
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v6
+      - uses: actions/checkout@v6
         with:
           persist-credentials: false
-
-      - name: Set up Go
-        uses: actions/setup-go@v6
+      - name: Download verified packages
+        uses: actions/download-artifact@v4
         with:
-          go-version-file: go.mod
-          cache-dependency-path: go.sum
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v6
-        with:
-          node-version: 20
-          cache: npm
-          cache-dependency-path: web/package-lock.json
-
-      - name: Build release packages
-        run: bash scripts/package-release.sh "$GITHUB_REF_NAME" dist
-
+          name: verified-release
+          path: dist
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}

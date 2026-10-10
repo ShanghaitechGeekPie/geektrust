@@ -11,16 +11,23 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
-	"path/filepath"
 	"time"
 
-	"geektrust/internal/privatefile"
+	"github.com/ShanghaitechGeekPie/geektrust/internal/privatefile"
+	"github.com/ShanghaitechGeekPie/geektrust/internal/storage"
 )
 
-// State is the persisted session (encrypted, 0600).
+// State is the persisted encrypted session.
 type State struct {
+	Version         int    `json:"version"`
+	ControllerURL   string `json:"controller_url"`
+	IdentityIssuer  string `json:"identity_issuer"`
+	IdentitySubject string `json:"identity_subject"`
+	IdentityKind    string `json:"identity_kind"`
+	LoginDomain     string `json:"login_domain"`
+	Username        string `json:"username"`
+
 	SID       string         `json:"sid"`
 	DeviceID  string         `json:"device_id"`
 	CsrfToken string         `json:"csrf_token"`
@@ -40,73 +47,92 @@ type CookieRecord struct {
 	Value string `json:"value"`
 }
 
-// Store encrypts State with AES-256-GCM under a random key kept in a sibling
-// 0600 key file (<state_file>.key). The key is generated on first save; both
-// files together protect credentials at rest while staying fully automatic
-// (no passphrase to type).
+// Store encrypts State with AES-256-GCM under a random sibling key file.
+// File permission problems warn by default or fail when strict mode is enabled.
 type Store struct {
-	path string
+	path              string
+	strictPermissions bool
 }
 
 // NewStore creates a Store for the given state file path.
-func NewStore(path string) *Store { return &Store{path: path} }
+func NewStore(path string, strictPermissions bool) *Store {
+	return &Store{path: path, strictPermissions: strictPermissions}
+}
 
 func (s *Store) keyPath() string { return s.path + ".key" }
 
 // Load reads and decrypts the state. It returns (nil, nil) when no state file
 // exists yet.
 func (s *Store) Load(ctx context.Context) (*State, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	sealed, err := os.ReadFile(s.path)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("read state: %w", err)
-	}
-	key, err := s.readKey()
-	if err != nil {
-		return nil, fmt.Errorf("state key: %w", err)
-	}
-	plain, err := decrypt(key, sealed)
-	if err != nil {
-		return nil, fmt.Errorf("decrypt state: %w", err)
+	b, e := s.LoadBytes(ctx)
+	if e != nil || len(b) == 0 {
+		return nil, e
 	}
 	var st State
-	if err := json.Unmarshal(plain, &st); err != nil {
-		return nil, fmt.Errorf("decode state: %w", err)
+	if e = json.Unmarshal(b, &st); e != nil {
+		return nil, e
 	}
 	return &st, nil
 }
-
-// Save encrypts and atomically writes the state.
 func (s *Store) Save(ctx context.Context, st *State) error {
-	if err := ctx.Err(); err != nil {
-		return err
+	v := *st
+	v.SavedAt = time.Now()
+	b, e := json.Marshal(v)
+	if e != nil {
+		return e
 	}
-	st.SavedAt = time.Now()
-	plain, err := json.Marshal(st)
-	if err != nil {
-		return fmt.Errorf("encode state: %w", err)
+	return s.SaveBytes(ctx, b)
+}
+func (s *Store) LoadBytes(ctx context.Context) ([]byte, error) {
+	if e := ctx.Err(); e != nil {
+		return nil, e
 	}
-	key, err := s.loadOrCreateKey()
-	if err != nil {
-		return fmt.Errorf("state key: %w", err)
+	if e := privatefile.Check(s.path, s.strictPermissions); e != nil {
+		return nil, e
 	}
-	sealed, err := encrypt(key, plain)
-	if err != nil {
-		return fmt.Errorf("encrypt state: %w", err)
+	sealed, e := os.ReadFile(s.path)
+	if errors.Is(e, os.ErrNotExist) {
+		return nil, nil
 	}
-	if err := writeFileAtomic(s.path, sealed, 0o600); err != nil {
-		return fmt.Errorf("write state: %w", err)
+	if e != nil {
+		return nil, e
 	}
-	return nil
+	key, e := s.readKey()
+	if e != nil {
+		return nil, e
+	}
+	return decrypt(key, sealed)
+}
+func (s *Store) SaveBytes(ctx context.Context, b []byte) error {
+	if e := ctx.Err(); e != nil {
+		return e
+	}
+	key, e := s.loadOrCreateKey()
+	if e != nil {
+		return e
+	}
+	sealed, e := encrypt(key, b)
+	if e != nil {
+		return e
+	}
+	return storage.WriteAtomic(s.path, sealed, s.strictPermissions)
+}
+func (s *Store) Delete(ctx context.Context) error {
+	if e := ctx.Err(); e != nil {
+		return e
+	}
+	e := os.Remove(s.path)
+	if errors.Is(e, os.ErrNotExist) {
+		return nil
+	}
+	return e
 }
 
 func (s *Store) readKey() ([]byte, error) {
 	path := s.keyPath()
+	if err := privatefile.Check(path, s.strictPermissions); err != nil {
+		return nil, err
+	}
 	key, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
@@ -114,49 +140,25 @@ func (s *Store) readKey() ([]byte, error) {
 	if len(key) != 32 {
 		return nil, fmt.Errorf("%s: expected 32 bytes, got %d", path, len(key))
 	}
-	if err := privatefile.Protect(path); err != nil {
-		return nil, fmt.Errorf("protect state key: %w", err)
-	}
 	return key, nil
 }
 
 func (s *Store) loadOrCreateKey() ([]byte, error) {
-	key, err := s.readKey()
-	if err == nil {
+	key, e := s.readKey()
+	if e == nil {
 		return key, nil
 	}
-	if !errors.Is(err, os.ErrNotExist) {
-		// A present-but-invalid key file is fatal: we must never overwrite it
-		// (that would destroy the only copy able to decrypt the state).
-		return nil, err
+	if !errors.Is(e, os.ErrNotExist) {
+		return nil, e
 	}
-	// Create with O_EXCL: concurrent first-time saves (e.g. two processes)
-	// can never overwrite each other's key, which would leave the other's
-	// ciphertext permanently undecryptable. The loser reads the winner's key.
 	key = make([]byte, 32)
-	if _, err := rand.Read(key); err != nil {
-		return nil, err
+	if _, e = rand.Read(key); e != nil {
+		return nil, e
 	}
-	f, err := os.OpenFile(s.keyPath(), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
-		if errors.Is(err, os.ErrExist) {
-			return s.readKey()
-		}
-		return nil, err
-	}
-	if err := privatefile.Protect(s.keyPath()); err != nil {
-		f.Close()
-		os.Remove(s.keyPath())
-		return nil, err
-	}
-	_, werr := f.Write(key)
-	cerr := f.Close()
-	if werr != nil || cerr != nil {
-		os.Remove(s.keyPath()) // never leave a half-written key behind
-		if werr != nil {
-			return nil, werr
-		}
-		return nil, cerr
+	if e = storage.CreateExclusive(s.keyPath(), key, s.strictPermissions); errors.Is(e, os.ErrExist) {
+		return s.readKey()
+	} else if e != nil {
+		return nil, e
 	}
 	return key, nil
 }
@@ -192,41 +194,6 @@ func decrypt(key, sealed []byte) ([]byte, error) {
 	}
 	nonce, ct := sealed[:gcm.NonceSize()], sealed[gcm.NonceSize():]
 	return gcm.Open(nil, nonce, ct, nil)
-}
-
-// writeFileAtomic writes via temp file + rename so secrets are never left
-// half-written.
-func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
-	}
-	tmp, err := os.CreateTemp(dir, ".state-*.tmp")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
-	if err := privatefile.Protect(tmpName); err != nil {
-		tmp.Close()
-		return err
-	}
-	if _, err := io.WriteString(tmp, string(data)); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Chmod(perm); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmpName, path)
 }
 
 // StateStore persists session state; embedding applications can supply protected storage.

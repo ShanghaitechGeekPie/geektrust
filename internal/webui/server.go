@@ -15,9 +15,10 @@ import (
 	"strings"
 	"time"
 
-	"geektrust/internal/config"
-	"geektrust/internal/sdpc"
-	"geektrust/internal/session"
+	"github.com/ShanghaitechGeekPie/geektrust/internal/config"
+	"github.com/ShanghaitechGeekPie/geektrust/internal/runtime"
+	"github.com/ShanghaitechGeekPie/geektrust/internal/sdpc"
+	"github.com/ShanghaitechGeekPie/geektrust/internal/session"
 )
 
 //go:embed all:dist
@@ -29,7 +30,7 @@ const placeholderPage = `<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><title>geekTrust 面板</title></head>
 <body style="font-family:system-ui;max-width:640px;margin:4em auto;line-height:1.6">
 <h1>geekTrust Web 面板</h1>
-<p>前端资源尚未构建。请安装 Node 20+，在仓库根目录执行 <code>make build</code> 重新构建 geekTrust。</p>
+<p>前端资源尚未构建。请安装 Node 22.22+，在仓库根目录执行 <code>make build</code> 重新构建 geekTrust。</p>
 <p>VPN 和本地代理不受影响，可照常使用。</p>
 </body></html>
 `
@@ -37,7 +38,10 @@ const placeholderPage = `<!doctype html>
 // ProviderAPI is the narrow provider surface the handlers need; fakes can
 // implement it for deterministic tests.
 type ProviderAPI interface {
-	ActiveSDPC() *sdpc.Client
+	QueryTrustDevice(context.Context) (*sdpc.TrustDeviceList, error)
+	TrustDevice(context.Context) error
+	UntrustDevice(context.Context, []string) error
+	LogoutTrustDevice(context.Context, string) error
 	TryForceRelogin() (run func(context.Context), ok bool)
 }
 
@@ -50,11 +54,14 @@ type Server struct {
 	http     *http.Server
 	dist     fs.FS
 	hasUI    bool
+	lifetime context.Context
+	cancel   context.CancelFunc
 }
 
 // NewServer wires the routes, security middleware and embedded frontend.
 func NewServer(hub *Hub, broker *Broker, provider ProviderAPI, cfg *config.Config) *Server {
-	s := &Server{hub: hub, broker: broker, provider: provider, cfg: cfg}
+	ctx, cancel := context.WithCancel(context.Background())
+	s := &Server{hub: hub, broker: broker, provider: provider, cfg: cfg, lifetime: ctx, cancel: cancel}
 	if sub, err := fs.Sub(distFS, "dist"); err == nil {
 		s.dist = sub
 		if f, err := sub.Open("index.html"); err == nil {
@@ -97,6 +104,7 @@ func (s *Server) Serve(listener net.Listener) error {
 // a client that stopped reading mid-response) are hard-closed instead of
 // leaked past the deadline.
 func (s *Server) Shutdown(ctx context.Context) error {
+	s.cancel()
 	err := s.http.Shutdown(ctx)
 	if err != nil {
 		s.http.Close()
@@ -250,26 +258,22 @@ func (s *Server) handleRelogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// The reserved acquisition must run exactly once and outlive the request.
-	go run(context.Background())
+	go run(s.lifetime)
 	writeJSON(w, http.StatusAccepted, map[string]any{})
 }
 
-func (s *Server) activeSC(w http.ResponseWriter) *sdpc.Client {
-	sc := s.provider.ActiveSDPC()
-	if sc == nil {
-		writeError(w, http.StatusServiceUnavailable, "no active session")
+func writeDeviceError(w http.ResponseWriter, err error) {
+	status := http.StatusInternalServerError
+	if errors.Is(err, runtime.ErrNoSession) || errors.Is(err, session.ErrSessionReplaced) {
+		status = http.StatusServiceUnavailable
 	}
-	return sc
+	writeError(w, status, err.Error())
 }
 
 func (s *Server) handleTrustList(w http.ResponseWriter, r *http.Request) {
-	sc := s.activeSC(w)
-	if sc == nil {
-		return
-	}
-	list, err := sc.QueryTrustDevice(r.Context())
+	list, err := s.provider.QueryTrustDevice(r.Context())
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeDeviceError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, list)
@@ -277,15 +281,11 @@ func (s *Server) handleTrustList(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleTrustBind(w http.ResponseWriter, r *http.Request) {
 	if s.cfg.ClientType != "client" {
-		writeError(w, http.StatusConflict, `trust-device bind requires client_type = "client" in config`)
+		writeError(w, http.StatusConflict, `trust-device bind requires client authentication mode`)
 		return
 	}
-	sc := s.activeSC(w)
-	if sc == nil {
-		return
-	}
-	if err := sc.TrustDevice(r.Context()); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+	if err := s.provider.TrustDevice(r.Context()); err != nil {
+		writeDeviceError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{})
@@ -303,12 +303,8 @@ func (s *Server) handleTrustUnbind(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "ids must not be empty")
 		return
 	}
-	sc := s.activeSC(w)
-	if sc == nil {
-		return
-	}
-	if err := sc.UntrustDevice(r.Context(), req.IDs); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+	if err := s.provider.UntrustDevice(r.Context(), req.IDs); err != nil {
+		writeDeviceError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{})
@@ -326,12 +322,8 @@ func (s *Server) handleTrustLogout(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "id must not be empty")
 		return
 	}
-	sc := s.activeSC(w)
-	if sc == nil {
-		return
-	}
-	if err := sc.LogoutDevice(r.Context(), req.ID); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+	if err := s.provider.LogoutTrustDevice(r.Context(), req.ID); err != nil {
+		writeDeviceError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{})
@@ -376,3 +368,5 @@ func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
 	}
 	http.FileServerFS(s.dist).ServeHTTP(w, r)
 }
+
+func (s *Server) SetLifetime(ctx context.Context) { context.AfterFunc(ctx, s.cancel) }

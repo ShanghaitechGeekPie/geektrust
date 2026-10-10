@@ -18,6 +18,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/ShanghaitechGeekPie/geektrust/internal/httporigin"
 	"golang.org/x/net/html"
 )
 
@@ -164,7 +165,7 @@ func (c *ecnuClient) request(ctx context.Context, method, target, content string
 		if len(via) >= 10 {
 			return errors.New("SSO redirect limit")
 		}
-		if r.URL.Scheme != origin.Scheme || r.URL.Host != origin.Host {
+		if !httporigin.Same(r.URL, origin) {
 			return http.ErrUseLastResponse
 		}
 		return nil
@@ -192,7 +193,7 @@ func (c *ecnuClient) request(ctx context.Context, method, target, content string
 	return b, nil
 }
 func (c *ecnuClient) Login(ctx context.Context) error {
-	if c.BaseURL != c.Keystore.BaseURL() || c.Origin != c.BaseURL {
+	if c.BaseURL != strings.TrimRight(c.Keystore.BaseURL(), "/") || c.Origin != c.BaseURL {
 		return errors.New("credential origin mismatch")
 	}
 	page, err := c.request(ctx, http.MethodGet, c.BaseURL+"/login", "", nil, nil, true)
@@ -252,7 +253,7 @@ func (c *ecnuClient) Login(ctx context.Context) error {
 		return errors.New("invalid SSO finish URL")
 	}
 	target := base.ResolveReference(ref)
-	if target.Scheme != base.Scheme || target.Host != base.Host || target.User != nil || target.Fragment != "" {
+	if !httporigin.Same(target, base) || target.Fragment != "" {
 		return errors.New("SSO finish URL outside credential origin")
 	}
 	assertion, count, err := buildAssertion(options, c.Keystore, c.Origin)
@@ -261,7 +262,7 @@ func (c *ecnuClient) Login(ctx context.Context) error {
 	}
 	c.Keystore.SetSignCount(count)
 	if err = c.Keystore.Save(); err != nil {
-		return errors.New("cannot persist passkey counter")
+		return fmt.Errorf("cannot persist passkey counter: %w", err)
 	}
 	token := request["sessionToken"]
 	if token == nil {

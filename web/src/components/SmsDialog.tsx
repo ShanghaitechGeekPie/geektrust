@@ -1,118 +1,179 @@
 import { useEffect, useRef, useState } from "react";
+import { KeyRound } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import {
+  InputOTP,
+  InputOTPGroup,
+  InputOTPSlot,
+} from "@/components/ui/input-otp";
+import { REGEXP_ONLY_DIGITS } from "input-otp";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+} from "@/components/ui/dialog";
 import { post, postJSON, ApiError, errorText } from "../api";
 import type { FriendlyError } from "../errors";
 import type { Snapshot } from "../types";
 import { ErrorText } from "./ErrorText";
-
-const RESEND_COOLDOWN = 60;
-
-// SmsDialog pops up whenever the controller demands SMS verification. The
-// submission carries the current generation so a stale dialog can never
-// deliver a code into a newer prompt; all local state resets whenever the
-// generation changes. The resend button carries a client-side cooldown —
-// the controller rate-limits resends anyway (429), so don't invite it.
-export function SmsDialog({ snap }: { snap: Snapshot }) {
+export function SmsDialog({
+  snap,
+  connected,
+  open,
+  onOpenChange,
+}: {
+  snap: Snapshot;
+  connected: boolean;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}) {
   const [code, setCode] = useState("");
   const [busy, setBusy] = useState(false);
+  const [resending, setResending] = useState(false);
   const [error, setError] = useState<FriendlyError | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const [cooldown, setCooldown] = useState(RESEND_COOLDOWN);
-  const inputRef = useRef<HTMLInputElement>(null);
-
-  const gen = snap.sms_pending ? snap.sms_gen : 0;
-  const currentGen = useRef(gen);
-  currentGen.current = gen;
+  const [cooldown, setCooldown] = useState(60);
+  const active = useRef(true);
+  const inFlight = useRef(false);
   useEffect(() => {
-    if (gen === 0) return;
-    setCode("");
-    setBusy(false);
-    setError(null);
-    setNotice(null);
-    setCooldown(RESEND_COOLDOWN);
-    inputRef.current?.focus();
-    const timer = window.setInterval(() => setCooldown((s) => (s > 0 ? s - 1 : 0)), 1000);
-    return () => window.clearInterval(timer);
-  }, [gen]);
-
-  if (!snap.sms_pending) return null;
-
-  const submit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (busy || code.length !== 6) return;
+    active.current = true;
+    const timer = window.setInterval(
+      () => setCooldown((value) => Math.max(0, value - 1)),
+      1000,
+    );
+    return () => {
+      active.current = false;
+      window.clearInterval(timer);
+    };
+  }, []);
+  // App keys this dialog by SMS generation, so old responses cannot affect a new prompt.
+  const submit = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!connected || inFlight.current || code.length !== 6) return;
+    inFlight.current = true;
     setBusy(true);
     setError(null);
     setNotice(null);
     try {
       await post("/api/sms", { code, gen: snap.sms_gen });
-      // 202 = 已投递;登录结果经 SSE 推送。验证失败会结束本次登录,
-      // 弹窗随之关闭,状态卡片会显示失败原因。
-      setNotice("已提交，等待服务端验证…");
-    } catch (err) {
+      if (active.current) setNotice("已提交，等待服务端验证…");
+    } catch (error) {
+      if (!active.current) return;
+      inFlight.current = false;
       setBusy(false);
       setError(
-        errorText(err, "提交失败", {
+        errorText(error, "提交失败", {
           400: "验证码需为 6 位数字",
-          409: "验证码已在其他页面或终端提交，或本轮验证已结束",
+          409: "验证码已提交，或本轮验证已结束",
         }),
       );
     }
   };
-
   const resend = async () => {
-    if (busy || cooldown > 0) return;
+    if (!connected || inFlight.current || cooldown > 0) return;
+    inFlight.current = true;
+    setResending(true);
     setError(null);
     setNotice(null);
     try {
-      const requestedGen = snap.sms_gen;
-      const result = await postJSON<{ restarting?: boolean }>("/api/sms/resend", { gen: requestedGen });
-      if (currentGen.current !== requestedGen) return;
-      setNotice(result.restarting ? "验证已过期，正在重新登录并发送新验证码…" : "验证码已重新发送");
-      setCooldown(RESEND_COOLDOWN);
-    } catch (err) {
-      if (err instanceof ApiError && err.status === 429) {
-        // 上一条验证码仍在有效期内:直接输入它,同时进入冷却防止连点。
-        setCooldown(RESEND_COOLDOWN);
-        setError(errorText(err, "发送过于频繁，上一条验证码仍然有效"));
-      } else {
-        setError(errorText(err, "重发失败", { 409: "本轮验证已结束" }));
+      const result = await postJSON<{ restarting?: boolean }>(
+        "/api/sms/resend",
+        { gen: snap.sms_gen },
+      );
+      if (!active.current) return;
+      setNotice(
+        result.restarting
+          ? "验证已过期，正在重新登录并发送新验证码…"
+          : "验证码已重新发送",
+      );
+      setCooldown(60);
+    } catch (error) {
+      if (!active.current) return;
+      if (error instanceof ApiError && error.status === 429) setCooldown(60);
+      setError(
+        errorText(error, "重发失败", {
+          409: "本轮验证已结束",
+          429: "发送过于频繁，上一条验证码仍然有效",
+        }),
+      );
+    } finally {
+      if (active.current) {
+        inFlight.current = false;
+        setResending(false);
       }
     }
   };
-
   return (
-    <div className="dialog-backdrop">
-      <form
-        className="dialog"
-        onSubmit={submit}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="sms-title"
-      >
-        <h2 id="sms-title">短信验证</h2>
-        <p className="muted">6 位验证码已发送到你的手机，输入后继续登录。</p>
-        <input
-          ref={inputRef}
-          value={code}
-          onChange={(e) => setCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
-          placeholder="6 位验证码"
-          inputMode="numeric"
-          autoComplete="one-time-code"
-          disabled={busy}
-          className="code-input mono"
-          aria-label="6 位短信验证码"
-        />
-        {error && <ErrorText error={error} />}
-        {notice && <p className="ok-text">{notice}</p>}
-        <div className="actions">
-          <button type="submit" disabled={busy || code.length !== 6}>
-            {busy ? "验证中…" : "验证"}
-          </button>
-          <button type="button" className="secondary" onClick={() => void resend()} disabled={busy || cooldown > 0}>
-            {cooldown > 0 ? `重新发送（${cooldown}s）` : "重新发送"}
-          </button>
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="sms-dialog">
+        <div className="dialog-icon">
+          <KeyRound className="size-5" />
         </div>
-        <p className="muted small">也可以在运行 geektrust 的终端中输入验证码，以先提交的为准。</p>
-      </form>
-    </div>
+        <DialogHeader>
+          <DialogTitle>短信验证</DialogTitle>
+          <DialogDescription>
+            6 位验证码已发送到你的手机，输入后继续登录。
+          </DialogDescription>
+        </DialogHeader>
+        <form
+          onSubmit={(event) => void submit(event)}
+          className="flex flex-col gap-4"
+        >
+          <InputOTP
+            maxLength={6}
+            pattern={REGEXP_ONLY_DIGITS}
+            value={code}
+            onChange={setCode}
+            disabled={busy || resending || !connected}
+            aria-label="6 位短信验证码"
+            autoFocus
+          >
+            <InputOTPGroup className="w-full justify-center">
+              {Array.from({ length: 6 }, (_, index) => (
+                <InputOTPSlot
+                  className="h-12 flex-1 max-w-14"
+                  key={index}
+                  index={index}
+                />
+              ))}
+            </InputOTPGroup>
+          </InputOTP>
+          {error && <ErrorText error={error} />}
+          {notice && (
+            <p className="text-sm text-success" role="status">
+              {notice}
+            </p>
+          )}
+          {!connected && (
+            <p className="text-sm text-warning" role="status">
+              面板连接已断开，恢复后可继续验证。
+            </p>
+          )}
+          <Button
+            type="submit"
+            disabled={!connected || busy || resending || code.length !== 6}
+          >
+            {busy ? "验证中…" : "验证并连接"}
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            disabled={!connected || busy || resending || cooldown > 0}
+            onClick={() => void resend()}
+          >
+            {resending
+              ? "发送中…"
+              : cooldown > 0
+                ? `重新发送（${cooldown}s）`
+                : "重新发送"}
+          </Button>
+          <p className="text-xs leading-5 text-muted-foreground">
+            也可以在运行 geektrust 的终端中输入验证码，以先提交的为准。
+          </p>
+        </form>
+      </DialogContent>
+    </Dialog>
   );
 }

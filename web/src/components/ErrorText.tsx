@@ -1,29 +1,25 @@
-import { useState } from "react";
 import type { FriendlyError } from "../errors";
-
-// ErrorText shows the actionable line and keeps the original Go error chain
-// behind a toggle: out of the way for normal use, still there when the raw
-// controller code or transport detail is what you actually need.
-export function ErrorText({ error, prefix }: { error: FriendlyError; prefix?: string }) {
-  const [open, setOpen] = useState(false);
-  const { summary, detail } = error;
+export function ErrorText({
+  error,
+  prefix,
+}: {
+  error: FriendlyError;
+  prefix?: string;
+}) {
   return (
-    <div className="error-block">
-      <p className="error-text">
+    <div className="error-block" role="alert">
+      <p>
         {prefix}
-        {summary}
-        {detail && (
-          <button
-            type="button"
-            className="link detail-toggle"
-            onClick={() => setOpen((v) => !v)}
-            aria-expanded={open}
-          >
-            {open ? "收起" : "详情"}
-          </button>
-        )}
+        {error.summary}
       </p>
-      {open && detail && <pre className="error-detail mono">{detail}</pre>}
+      {error.detail && (
+        <details className="mt-1">
+          <summary className="cursor-pointer text-xs">错误详情</summary>
+          <pre className="mt-2 whitespace-pre-wrap break-all font-mono text-xs">
+            {error.detail}
+          </pre>
+        </details>
+      )}
     </div>
   );
 }

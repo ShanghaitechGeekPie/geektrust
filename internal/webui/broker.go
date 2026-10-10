@@ -10,14 +10,14 @@ import (
 	"strings"
 	"sync"
 
-	"geektrust/internal/sdpc"
+	"github.com/ShanghaitechGeekPie/geektrust/internal/sdpc"
 )
 
 // ErrNoPending is returned by claims and resends when no SMS verification is
 // pending (or the generation does not match). HTTP maps it to 409.
 var ErrNoPending = errors.New("no SMS verification pending")
 
-// smsPending is one armed prompt generation. opMu serializes resend network
+// smsPending is one armed prompt generation. opGate serializes resend network
 // I/O against Prompt teardown only; claims never touch it.
 type smsPending struct {
 	gen      uint64
@@ -26,10 +26,7 @@ type smsPending struct {
 	done     bool                 // Broker.mu: Prompt retired this generation
 	expired  error                // Broker.mu: resend proved the auth session expired
 	resend   func(context.Context) error
-	opMu     sync.Mutex
-	// opWaiters counts resends between the first validation and the opMu
-	// acquisition (observability for tests; guarded by Broker.mu).
-	opWaiters int
+	opGate   chan struct{}
 }
 
 type smsPromptResult struct {
@@ -71,7 +68,7 @@ func (b *Broker) Prompt(ctx context.Context, resend func(context.Context) error)
 		b.gen++
 	}
 	result := make(chan smsPromptResult, 1)
-	p := &smsPending{gen: b.gen, result: result, resend: resend}
+	p := &smsPending{gen: b.gen, result: result, resend: resend, opGate: make(chan struct{}, 1)}
 	b.pending = p
 	b.mu.Unlock()
 
@@ -105,8 +102,8 @@ func (b *Broker) Prompt(ctx context.Context, resend func(context.Context) error)
 		b.mu.Unlock()
 		b.onPendingChange(false, 0)
 		// Wait for an in-flight resend so CheckSMSCode never overlaps it.
-		cur.opMu.Lock()
-		cur.opMu.Unlock()
+		cur.opGate <- struct{}{}
+		<-cur.opGate
 		b.mu.Lock()
 		expired := cur.expired
 		b.mu.Unlock()
@@ -119,8 +116,8 @@ func (b *Broker) Prompt(ctx context.Context, resend func(context.Context) error)
 	b.pending = nil
 	b.mu.Unlock()
 	b.onPendingChange(false, 0)
-	cur.opMu.Lock()
-	cur.opMu.Unlock()
+	cur.opGate <- struct{}{}
+	<-cur.opGate
 	b.mu.Lock()
 	expired := cur.expired
 	b.mu.Unlock()
@@ -158,8 +155,8 @@ func (b *Broker) claim(code string, gen uint64, web bool) error {
 }
 
 // Resend re-triggers the SMS for the armed generation. Two validations
-// (before and after acquiring the generation's opMu) keep it from running
-// after a claim or teardown; the network call holds opMu, not Broker.mu.
+// (before and after acquiring the generation's opGate) keep it from running
+// after a claim or teardown; the network call holds opGate, not Broker.mu.
 func (b *Broker) Resend(ctx context.Context, gen uint64) error {
 	b.mu.Lock()
 	p := b.pending
@@ -169,15 +166,12 @@ func (b *Broker) Resend(ctx context.Context, gen uint64) error {
 	}
 	b.mu.Unlock()
 
-	// Between the two validations the resend queues on the generation's opMu.
-	b.mu.Lock()
-	p.opWaiters++
-	b.mu.Unlock()
-	p.opMu.Lock()
-	b.mu.Lock()
-	p.opWaiters--
-	b.mu.Unlock()
-	defer p.opMu.Unlock()
+	select {
+	case p.opGate <- struct{}{}:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	defer func() { <-p.opGate }()
 	b.mu.Lock()
 	valid := b.pending == p && !p.done && !p.resolved && gen == p.gen
 	resendFn := p.resend
@@ -193,7 +187,7 @@ func (b *Broker) Resend(ctx context.Context, gen uint64) error {
 	// The controller discarded the authentication behind this prompt. Retire
 	// the generation and wake the blocked Provider so it can rebuild the full
 	// login chain. Record the expiration even if a code claim already won:
-	// Prompt waits for opMu and lets this known expiration override that code.
+	// Prompt waits for opGate and lets this known expiration override that code.
 	b.mu.Lock()
 	p.expired = err
 	deliver := b.pending == p && !p.done && !p.resolved && gen == p.gen

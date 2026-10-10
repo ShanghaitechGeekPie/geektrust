@@ -3,9 +3,13 @@ package sdpc
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
+
+	"github.com/ShanghaitechGeekPie/geektrust/auth"
+	"github.com/ShanghaitechGeekPie/geektrust/internal/httporigin"
 )
 
 // CasTicket runs the CAS redirect chain:
@@ -44,12 +48,15 @@ func (c *Client) CasTicket(ctx context.Context) (string, error) {
 	var shortcutURL *url.URL
 	noFollow := *c.HTTP
 	noFollow.CheckRedirect = func(r *http.Request, via []*http.Request) error {
-		if r.URL.Host == base.Host && r.URL.Scheme == base.Scheme && r.URL.Path == "/portal/shortcut.html" {
+		if base.Scheme == "https" && r.URL.Scheme != "https" {
+			return errors.New("cas chain: insecure redirect")
+		}
+		if httporigin.Same(r.URL, base) && r.URL.Path == "/portal/shortcut.html" {
 			shortcutURL = r.URL
 			return http.ErrUseLastResponse
 		}
 		// Never leak the controller CSRF token to the IDS hop.
-		if r.URL.Host != base.Host {
+		if !httporigin.Same(r.URL, base) {
 			r.Header.Del("x-csrf-token")
 		}
 		if len(via) >= 10 {
@@ -59,13 +66,25 @@ func (c *Client) CasTicket(ctx context.Context) (string, error) {
 	}
 	resp, err := noFollow.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("cas chain request failed")
+		cause := ctx.Err()
+		if cause == nil {
+			if errors.Is(err, context.Canceled) {
+				cause = context.Canceled
+			} else if errors.Is(err, context.DeadlineExceeded) {
+				cause = context.DeadlineExceeded
+			}
+		}
+		if cause != nil {
+			return "", fmt.Errorf("cas chain request failed: %w", cause)
+		}
+		return "", errors.New("cas chain request failed")
 	}
+
 	resp.Body.Close()
 
 	if shortcutURL == nil {
-		// Some deployments serve shortcut.html directly as the final 200.
-		if resp.Request != nil && resp.Request.URL.Path == "/portal/shortcut.html" {
+		// Some controllers serve shortcut.html directly as the final 200.
+		if resp.StatusCode == http.StatusOK && resp.Request != nil && httporigin.Same(resp.Request.URL, base) && resp.Request.URL.Path == "/portal/shortcut.html" {
 			shortcutURL = resp.Request.URL
 		}
 	}
@@ -139,14 +158,22 @@ func (c *Client) AuthCheck(ctx context.Context) (needSMS bool, err error) {
 		return false, err
 	}
 	if data.NextService != "" {
-		return data.NextService == "auth/sms", nil
-	}
-	for _, item := range data.NextServiceList {
-		if item.AuthType == "auth/sms" {
+		switch data.NextService {
+		case "auth/sms":
 			return true, nil
+		default:
+			return false, &auth.UnsupportedError{Method: data.NextService}
 		}
 	}
-	return false, nil
+	needSMS = false
+	for _, item := range data.NextServiceList {
+		if item.AuthType == "auth/sms" {
+			needSMS = true
+		} else {
+			return false, &auth.UnsupportedError{Method: item.AuthType}
+		}
+	}
+	return needSMS, nil
 }
 
 // SendSMS triggers the verification text.

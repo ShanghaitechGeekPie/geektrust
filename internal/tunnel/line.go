@@ -216,16 +216,6 @@ func closeLineResults(results <-chan lineDialResult, remaining int) {
 	}
 }
 
-// Best retains the diagnostic line-selection API. Runtime callers should use
-// DialTLS so the successful connection is not discarded and opened again.
-func (l *Lines) Best(ctx context.Context) (string, error) {
-	conn, addr, err := l.DialTLS(ctx)
-	if conn != nil {
-		conn.Close()
-	}
-	return addr, err
-}
-
 func probeGatewayTLS(ctx context.Context, addr string) (net.Conn, error) {
 	return probeGatewayTLSWithDialer(ctx, addr, nil, nil, nil)
 }

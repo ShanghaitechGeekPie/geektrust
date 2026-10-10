@@ -2,21 +2,22 @@ package session
 
 import (
 	"context"
+	"github.com/ShanghaitechGeekPie/geektrust/auth"
+	"github.com/ShanghaitechGeekPie/geektrust/internal/storage"
 	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"testing"
 	"time"
 
-	"geektrust/internal/config"
+	"github.com/ShanghaitechGeekPie/geektrust/internal/config"
 )
 
-type ephemeralStore struct{}
-
-func (ephemeralStore) Load(context.Context) (*State, error) { return nil, nil }
-func (ephemeralStore) Save(context.Context, *State) error   { return nil }
-
 func TestECNULiveSession(t *testing.T) {
+	if os.Getenv("GEEKTRUST_LIVE_TESTS") != "1" {
+		t.Skip("online tests require explicit GEEKTRUST_LIVE_TESTS=1")
+	}
 	path := os.Getenv("GEEKTRUST_ECNU_KEYSTORE")
 	if path == "" {
 		t.Skip("explicit live credential required")
@@ -26,8 +27,14 @@ func TestECNULiveSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg := &config.Config{Keystore: path, BaseURL: "https://vpn.ecnu.edu.cn", Platform: "Mac", ClientType: "browser", DeviceID: device}
-	p := NewProvider(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
-	p.SetStore(ephemeralStore{})
+	p := NewProvider(cfg.SessionOptions(), slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
+	identity, err := auth.NewPasskey(storage.CredentialFile{Path: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.Authenticate = func(ctx context.Context, h *http.Client) (string, error) {
+		return "", identity.Authenticate(ctx, h, auth.IdentityRequest{AllowInteraction: true})
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 	cred, err := p.Credential(ctx)

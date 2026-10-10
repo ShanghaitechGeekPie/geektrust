@@ -17,6 +17,8 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+
+	"github.com/ShanghaitechGeekPie/geektrust/internal/httporigin"
 )
 
 // ClientTypeBrowser is the unsigned browser client path.
@@ -78,10 +80,11 @@ func IsSessionExpired(err error) bool {
 // Client talks to the SDPC controller. The HTTP client must carry a cookie
 // jar; the session cookies (sid & friends) live there.
 type Client struct {
-	BaseURL  string
-	Platform string
-	DeviceID string
-	HTTP     *http.Client
+	DomainMapping *bool
+	BaseURL       string
+	Platform      string
+	DeviceID      string
+	HTTP          *http.Client
 
 	// ClientType selects the login path for reportEnv: ClientTypeBrowser
 	// (default) keeps the session in pure-web mode; ClientTypeDesktop marks
@@ -137,7 +140,7 @@ func (c *Client) SID() string {
 
 // envelope is the standard controller response wrapper.
 type envelope struct {
-	Code    int64           `json:"code"`
+	Code    *int64          `json:"code"`
 	Message string          `json:"message"`
 	Data    json.RawMessage `json:"data"`
 }
@@ -179,7 +182,23 @@ func (c *Client) doJSONWithType(ctx context.Context, method, path, clientType st
 		req.Header.Set("Content-Type", "application/json;charset=utf-8")
 	}
 
-	resp, err := c.HTTP.Do(req)
+	// JSON API calls stay on the controller origin. Cross-origin navigation
+	// belongs to CasTicket; following it here could forward CSRF or POST data.
+	hc := *c.HTTP
+	checkRedirect := hc.CheckRedirect
+	hc.CheckRedirect = func(r *http.Request, via []*http.Request) error {
+		if !httporigin.Same(r.URL, req.URL) {
+			return errors.New("controller redirect outside origin")
+		}
+		if checkRedirect != nil {
+			return checkRedirect(r, via)
+		}
+		if len(via) >= 10 {
+			return errors.New("controller redirect limit")
+		}
+		return nil
+	}
+	resp, err := hc.Do(req)
 	if err != nil {
 		return fmt.Errorf("sdpc %s: %w", path, err)
 	}
@@ -188,7 +207,11 @@ func (c *Client) doJSONWithType(ctx context.Context, method, path, clientType st
 	if err != nil {
 		return fmt.Errorf("sdpc %s: read response: %w", path, err)
 	}
-	if resp.StatusCode >= 400 {
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		var apiErr *APIError
+		if err := parseEnvelopeInto(raw, path, nil); errors.As(err, &apiErr) {
+			return apiErr
+		}
 		return fmt.Errorf("sdpc %s: HTTP %d", path, resp.StatusCode)
 	}
 
@@ -203,11 +226,11 @@ func parseEnvelope(raw []byte, out any) error {
 
 func parseEnvelopeInto(raw []byte, op string, out any) error {
 	var env envelope
-	if err := json.Unmarshal(raw, &env); err != nil {
+	if err := json.Unmarshal(raw, &env); err != nil || env.Code == nil {
 		return fmt.Errorf("sdpc %s: invalid response envelope", op)
 	}
-	if env.Code != CodeOK {
-		return &APIError{Op: op, Code: env.Code, Message: env.Message}
+	if *env.Code != CodeOK {
+		return &APIError{Op: op, Code: *env.Code, Message: env.Message}
 	}
 	if out != nil && len(env.Data) > 0 && string(env.Data) != "null" {
 		if err := json.Unmarshal(env.Data, out); err != nil {
@@ -215,11 +238,4 @@ func parseEnvelopeInto(raw []byte, op string, out any) error {
 		}
 	}
 	return nil
-}
-
-func truncate(b []byte, n int) string {
-	if len(b) > n {
-		b = b[:n]
-	}
-	return string(b)
 }

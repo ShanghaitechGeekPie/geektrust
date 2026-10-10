@@ -10,8 +10,8 @@ import (
 	"syscall"
 	"time"
 
-	"geektrust/internal/session"
-	"geektrust/internal/tunnel"
+	"github.com/ShanghaitechGeekPie/geektrust/internal/session"
+	"github.com/ShanghaitechGeekPie/geektrust/internal/tunnel"
 )
 
 const (
@@ -55,7 +55,7 @@ func (d *Dialer) Dial(ctx context.Context, ip string, port int, appID, domain st
 		if err == nil {
 			return conn, nil
 		}
-		if !tunnel.ShouldFallbackToL3(err) {
+		if !cred.AllowTCPFallback || !tunnel.ShouldFallbackToL3(err) {
 			return nil, err
 		}
 		d.Logger.Debug("direct TCP unavailable; falling back to L3", "ip", ip, "port", port, "err", err)
@@ -127,7 +127,7 @@ func (d *Dialer) dialWithRetry(ctx context.Context, network, ip string, port int
 	return nil, fmt.Errorf("dial %s:%d after %d attempt(s): %w", ip, port, attempts, lastErr)
 }
 func shouldRetryDial(err error) bool {
-	if errors.Is(err, syscall.ECONNREFUSED) {
+	if errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, context.Canceled) || errors.Is(err, session.ErrSessionReplaced) {
 		return false
 	}
 	var rejected *AuthRejectedError
@@ -234,7 +234,7 @@ func (d *Dialer) authorizeFlow(ctx context.Context, ip string, port int, appID, 
 
 	authID := tun.NextAuthID()
 	// Tunnel establishment may refresh the session after cred was read.
-	body, err := buildAuthRequestIP(tun.SID(), appID, cred.DeviceID, ip, port, tun.VIP(), srcPort, authID, domain, protocol)
+	body, err := buildAuthRequestIP(tun.SID(), appID, cred.DeviceID, ip, port, tun.VIP(), srcPort, authID, domain, protocol, cred.ProcessIdentity)
 	if err != nil {
 		flow.release()
 		return nil, err

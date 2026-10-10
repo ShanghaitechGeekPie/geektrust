@@ -11,13 +11,11 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"sync"
 	"sync/atomic"
 	"testing"
-	"time"
 
-	"geektrust/internal/config"
-	"geektrust/internal/sdpc"
+	"github.com/ShanghaitechGeekPie/geektrust/internal/sdpc"
+	"github.com/ShanghaitechGeekPie/geektrust/internal/settings"
 )
 
 type smsHandlerFunc func(context.Context, func(context.Context) error) (string, error)
@@ -30,67 +28,39 @@ func (f smsHandlerFunc) Prompt(ctx context.Context, resend func(context.Context)
 // must observe the same in-flight login result (regression: a size-1 result
 // channel stranded all waiters but one).
 func TestProviderSingleFlightBroadcast(t *testing.T) {
-	p := &Provider{store: NewStore(filepath.Join(t.TempDir(), "state.enc"))}
-
-	var logins atomic.Int32
-	// Stand in for the real login: slow, and counts invocations.
-	acquire := func(ctx context.Context) (*Credential, error) {
-		logins.Add(1)
-		time.Sleep(50 * time.Millisecond)
-		return &Credential{SID: "shared"}, nil
-	}
-
-	const waiters = 8
-	var wg sync.WaitGroup
-	results := make([]*Credential, waiters)
-	errs := make([]error, waiters)
-
-	// Drive the same code shape as Credential: one leader runs acquire,
-	// the rest wait on the shared call.
-	p.mu.Lock()
-	call := &refreshCall{done: make(chan struct{})}
-	p.refreshing = call
-	p.mu.Unlock()
-
-	for i := range waiters {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			if i == 0 {
-				cred, err := acquire(context.Background())
-				p.mu.Lock()
-				p.cur = cred
-				p.refreshing = nil
-				p.mu.Unlock()
-				call.cred, call.err = cred, err
-				close(call.done)
-				results[i], errs[i] = cred, err
-				return
-			}
-			// Waiters join the in-flight call.
-			p.mu.Lock()
-			c := p.refreshing
-			p.mu.Unlock()
-			if c == nil {
-				// Leader already finished: cached path.
-				p.mu.Lock()
-				results[i] = p.cur
-				p.mu.Unlock()
-				return
-			}
-			<-c.done
-			results[i], errs[i] = c.cred, c.err
-		}(i)
-	}
-	wg.Wait()
-
-	if n := logins.Load(); n != 1 {
-		t.Errorf("login ran %d times, want exactly 1", n)
-	}
-	for i := range waiters {
-		if errs[i] != nil || results[i] == nil || results[i].SID != "shared" {
-			t.Errorf("waiter %d got cred=%v err=%v", i, results[i], errs[i])
+	p := failingProvider(t)
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	sentinel := errors.New("fixture authentication stopped")
+	var calls atomic.Int32
+	p.Authenticate = func(context.Context, *http.Client) (string, error) {
+		if calls.Add(1) == 1 {
+			close(entered)
 		}
+		<-release
+		return "", sentinel
+	}
+	const count = 8
+	out := make(chan error, count)
+	go func() { _, e := p.Credential(context.Background()); out <- e }()
+	<-entered
+	var joined []*joinContext
+	for i := 1; i < count; i++ {
+		ctx := signalJoin(context.Background())
+		joined = append(joined, ctx)
+		go func() { _, e := p.Credential(ctx); out <- e }()
+	}
+	for _, ctx := range joined {
+		waitForJoiner(t, ctx)
+	}
+	close(release)
+	for i := 0; i < count; i++ {
+		if e := <-out; !errors.Is(e, sentinel) {
+			t.Fatalf("caller lost result: %v", e)
+		}
+	}
+	if calls.Load() != 1 {
+		t.Fatal("production authentication repeated")
 	}
 }
 
@@ -108,19 +78,20 @@ func TestRestoreSkipsDifferentClientType(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			statePath := filepath.Join(t.TempDir(), "state.enc")
-			store := NewStore(statePath)
+			store := NewStore(statePath, false)
 			const deviceID = "0123456789ABCDEF0123456789ABCDEF"
 			if err := store.Save(context.Background(), &State{
-				SID:        "synthetic-session",
-				DeviceID:   deviceID,
-				Cookies:    []CookieRecord{{Name: "sid", Value: "synthetic-session"}},
-				ClientType: tt.stateType,
+				ControllerURL: "http://127.0.0.1:1",
+				SID:           "synthetic-session",
+				DeviceID:      deviceID,
+				Cookies:       []CookieRecord{{Name: "sid", Value: "synthetic-session"}},
+				ClientType:    tt.stateType,
 			}); err != nil {
 				t.Fatal(err)
 			}
 
 			p := &Provider{
-				cfg: &config.Config{
+				cfg: &settings.Session{
 					BaseURL:    "http://127.0.0.1:1",
 					Platform:   "Mac",
 					DeviceID:   deviceID,
@@ -144,33 +115,21 @@ func TestRestoreSkipsDifferentClientType(t *testing.T) {
 // restore the rejected persisted session (regression: restore ran first and
 // handed back the very credential the caller declared dead).
 func TestInvalidateSkipsRestore(t *testing.T) {
-	dir := t.TempDir()
-	st := NewStore(filepath.Join(dir, "state.enc"))
-	if err := st.Save(context.Background(), &State{SID: "old-session", DeviceID: "D", Cookies: []CookieRecord{{Name: "sid", Value: "old-session"}}}); err != nil {
-		t.Fatal(err)
-	}
-	p := &Provider{store: st}
-
+	var probes atomic.Int32
+	p := newRestoreFixture(t, func(w http.ResponseWriter, r *http.Request) { probes.Add(1); restoreHandler(w, r) })
+	called := false
+	stop := errors.New("forced login")
+	p.Authenticate = func(context.Context, *http.Client) (string, error) { called = true; return "", stop }
 	p.Invalidate()
-	p.mu.Lock()
-	skip := p.forceLogin
-	p.mu.Unlock()
-	if !skip {
-		t.Fatal("Invalidate must set forceLogin")
+	if _, e := p.Credential(context.Background()); !errors.Is(e, stop) || !called {
+		t.Fatal("real login path not used")
 	}
-	// acquire consumes the flag.
-	p.mu.Lock()
-	consumed := p.forceLogin
-	p.forceLogin = false
-	p.mu.Unlock()
-	if !consumed {
-		t.Fatal("forceLogin flag lost before acquire")
+	if probes.Load() != 0 {
+		t.Fatal("invalidated session was restored")
 	}
 }
 
-// TestStoreKeyPermissionTightening: a pre-existing world-readable key file is
-// tightened to 0600 on use (regression: permissive modes were accepted).
-func TestStoreKeyPermissionTightening(t *testing.T) {
+func TestStoreReadPreservesExistingPermissions(t *testing.T) {
 	dir := t.TempDir()
 	keyPath := filepath.Join(dir, "state.enc.key")
 	key := make([]byte, 32)
@@ -180,7 +139,7 @@ func TestStoreKeyPermissionTightening(t *testing.T) {
 	if err := os.WriteFile(keyPath, key, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	st := NewStore(filepath.Join(dir, "state.enc"))
+	st := NewStore(filepath.Join(dir, "state.enc"), false)
 	if err := st.Save(context.Background(), &State{SID: "s"}); err != nil {
 		t.Fatal(err)
 	}
@@ -188,8 +147,8 @@ func TestStoreKeyPermissionTightening(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
-		t.Errorf("key perm = %o, want 600", info.Mode().Perm())
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o644 {
+		t.Errorf("key perm = %o, want 644", info.Mode().Perm())
 	}
 	// The original key must still decrypt the state (tighten, never replace).
 	got, err := st.Load(context.Background())
@@ -198,13 +157,13 @@ func TestStoreKeyPermissionTightening(t *testing.T) {
 	}
 }
 
-// TestStoreKeyExclusiveCreate: when the key appears between the missing-check
+// TestStoreReusesExistingKey: when the key appears between the missing-check
 // and creation, the existing key wins (O_EXCL path).
-func TestStoreKeyExclusiveCreate(t *testing.T) {
+func TestStoreReusesExistingKey(t *testing.T) {
 	dir := t.TempDir()
-	st := NewStore(filepath.Join(dir, "state.enc"))
+	st := NewStore(filepath.Join(dir, "state.enc"), false)
 	// Simulate the winner: create the key first.
-	winner := NewStore(filepath.Join(dir, "state.enc"))
+	winner := NewStore(filepath.Join(dir, "state.enc"), false)
 	if err := winner.Save(context.Background(), &State{SID: "winner"}); err != nil {
 		t.Fatal(err)
 	}

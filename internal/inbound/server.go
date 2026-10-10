@@ -12,8 +12,8 @@ import (
 	"sync"
 	"time"
 
-	"geektrust/internal/config"
-	"geektrust/internal/resolver"
+	"github.com/ShanghaitechGeekPie/geektrust/internal/config"
+	"github.com/ShanghaitechGeekPie/geektrust/internal/resolver"
 )
 
 const (
@@ -268,4 +268,16 @@ drain:
 			return
 		}
 	}
+}
+
+func (s *Server) dialTarget(ctx context.Context, t resolver.Resolution, p int, n string) (net.Conn, error) {
+	if d, ok := s.dialer.(interface {
+		DialResolved(context.Context, resolver.Resolution, int, string) (net.Conn, error)
+	}); ok {
+		return d.DialResolved(ctx, t, p, n)
+	}
+	if n == "udp" {
+		return s.dialer.DialUDP(ctx, t.IP, p, t.AppID, t.Domain)
+	}
+	return s.dialer.Dial(ctx, t.IP, p, t.AppID, t.Domain)
 }

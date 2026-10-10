@@ -44,14 +44,15 @@ func TestRestoreJoinerSurvivesLeaderCancellation(t *testing.T) {
 			secondCtx, stop := context.WithTimeout(context.Background(), 3*time.Second)
 			defer stop()
 			second := make(chan error, 1)
+			joined := signalJoin(secondCtx)
 			go func() {
-				cred, err := p.Credential(secondCtx)
+				cred, err := p.Credential(joined)
 				if err == nil && (cred == nil || cred.SID == "") {
 					err = errors.New("restore returned no credential")
 				}
 				second <- err
 			}()
-			waitForJoiner(t, p)
+			waitForJoiner(t, joined)
 			if !deadline {
 				cancel()
 			}
@@ -86,8 +87,9 @@ func TestCredentialJoinerDoesNotRetryIndependentTimeout(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	second := make(chan error, 1)
-	go func() { _, err := p.Credential(ctx); second <- err }()
-	waitForJoiner(t, p)
+	joined := signalJoin(ctx)
+	go func() { _, err := p.Credential(joined); second <- err }()
+	waitForJoiner(t, joined)
 	close(release)
 	for _, result := range []<-chan error{first, second} {
 		if err := <-result; !errors.Is(err, context.DeadlineExceeded) {

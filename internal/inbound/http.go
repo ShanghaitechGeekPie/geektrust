@@ -16,7 +16,7 @@ import (
 	"sync"
 	"time"
 
-	"geektrust/internal/resolver"
+	"github.com/ShanghaitechGeekPie/geektrust/internal/resolver"
 )
 
 const connectUDPPathPrefix = "/.well-known/masque/udp/"
@@ -81,7 +81,7 @@ func (s *Server) handleHTTPConnectTCP(ctx context.Context, client net.Conn, br *
 		writeHTTPStatus(client, http.StatusBadGateway, "host not resolvable")
 		return
 	}
-	upstream, err := s.dialer.Dial(setupCtx, target.IP, port, target.AppID, target.Domain)
+	upstream, err := s.dialTarget(setupCtx, target, port, "tcp")
 	if err != nil {
 		s.logger.Warn("http dial failed", "host", host, "err", err)
 		writeHTTPStatus(client, http.StatusBadGateway, "tunnel dial failed")
@@ -103,8 +103,18 @@ func (s *Server) handleHTTPConnectUDP(ctx context.Context, client net.Conn, br *
 		return
 	}
 
+	ctx, stop := context.WithCancel(ctx)
+	defer stop()
+	upgraded := make(chan struct{})
 	var writeMu sync.Mutex
 	table := newUDPFlowTable(ctx, s, 1, func(_ udpTarget, payload []byte) error {
+		// A remote peer can send data as soon as the UDP flow opens.
+		// Capsules must wait until the HTTP upgrade response is complete.
+		select {
+		case <-upgraded:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 		writeMu.Lock()
 		err := writeDatagramCapsule(client, payload)
 		writeMu.Unlock()
@@ -131,6 +141,7 @@ func (s *Server) handleHTTPConnectUDP(ctx context.Context, client net.Conn, br *
 		return
 	}
 	_ = client.SetDeadline(time.Time{})
+	close(upgraded)
 	s.logger.Info("http CONNECT-UDP", "target", target.key())
 
 	for {

@@ -3,23 +3,21 @@
 package privatefile
 
 import (
-	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 )
 
-func checkDirectory(_ string, info os.FileInfo, _ bool) error {
-	// A directory entry can be replaced by anyone who can write its parent.
-	if info.Mode().Perm()&0o022 != 0 && info.Mode()&os.ModeSticky == 0 {
-		return errors.New("directory is writable by other users")
+func ResolveExistingPath(path string) (string, error) { return filepath.EvalSymlinks(path) }
+func protect(path string) error                       { return os.Chmod(path, 0600) }
+
+func check(path string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	if info.Mode().Perm()&0077 != 0 {
+		return fmt.Errorf("group or other users have access (mode %04o)", info.Mode().Perm())
 	}
 	return nil
 }
-
-// CheckFile retains the Unix behavior; Protect applies the private file mode.
-func CheckFile(_ string) error { return nil }
-
-// ResolveExistingPath resolves aliases in an existing path.
-func ResolveExistingPath(path string) (string, error) { return filepath.EvalSymlinks(path) }
-
-func Protect(path string) error { return os.Chmod(path, 0o600) }

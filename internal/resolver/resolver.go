@@ -9,11 +9,12 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"strconv"
 	"strings"
 	"time"
 
-	"geektrust/internal/session"
+	"github.com/ShanghaitechGeekPie/geektrust/internal/session"
 )
 
 type TunnelDialer interface {
@@ -36,10 +37,12 @@ var DefaultPublicDNS = []string{"223.5.5.5", "119.29.29.29"}
 
 // Resolver resolves targets against the live credential's routing policy.
 type Resolver struct {
-	provider  session.CredentialProvider
-	tunnel    TunnelDialer
-	stages    []lookupStage // direct public resolvers, then the system resolver
-	tunnelDNS *dnsPool
+	provider         session.CredentialProvider
+	tunnel           TunnelDialer
+	stages           []lookupStage // direct public resolvers, then the system resolver
+	tunnelDNS        *dnsPool
+	disableTunnelDNS bool
+	fallback         func(context.Context, string) ([]netip.Addr, error)
 }
 
 // New builds a Resolver. Controller-pushed or configured DNS servers are read
@@ -78,8 +81,10 @@ func NewWithDialerOptions(provider session.CredentialProvider, tunnel TunnelDial
 
 // Resolution is a resolved dial target.
 type Resolution struct {
-	IP    string
-	AppID string
+	Generation uint64
+	Host       string
+	IP         string
+	AppID      string
 	// Domain carries the original hostname when the target is authorized
 	// via a wildcard (suffix) rule: the gateway matches "*.com"-style
 	// entries against the auth request's domain field, not the resolved IP.
@@ -101,11 +106,29 @@ func (r *Resolver) ResolveUDP(ctx context.Context, host string, port int) (Resol
 // match → TLD suffix fallback. IP-policy matches carry no domain because the
 // gateway checks destAddr. Wildcard matches carry the original domain because
 // the gateway checks that field against its own DNS result.
-func (r *Resolver) resolve(ctx context.Context, host string, port int, protocol string) (Resolution, error) {
+func (r *Resolver) resolve(ctx context.Context, host string, port int, protocol string) (result Resolution, failure error) {
 	cred, err := r.provider.Credential(ctx)
 	if err != nil {
 		return Resolution{}, err
 	}
+	if cred.Lifetime != nil {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithCancel(ctx)
+		stop := context.AfterFunc(cred.Lifetime, cancel)
+		defer func() {
+			stop()
+			cancel()
+			if cred.Lifetime.Err() != nil {
+				result, failure = Resolution{}, session.ErrSessionReplaced
+			}
+		}()
+	}
+	defer func() {
+		if failure == nil {
+			result.Generation = cred.Generation
+			result.Host = host
+		}
+	}()
 	if isGatewayTarget(cred, host, nil, port) {
 		return Resolution{}, fmt.Errorf("%w: %s", ErrGatewayLoop, net.JoinHostPort(host, strconv.Itoa(port)))
 	}
@@ -138,7 +161,7 @@ func (r *Resolver) resolve(ctx context.Context, host string, port int, protocol 
 
 	v4, err := r.lookupIPv4(ctx, host, cred)
 	if err != nil {
-		return Resolution{}, fmt.Errorf("%w: %s: %v", ErrUnresolvable, host, err)
+		return Resolution{}, fmt.Errorf("%w: %s: %w", ErrUnresolvable, host, err)
 	}
 	if isGatewayTarget(cred, host, v4, port) {
 		return Resolution{}, fmt.Errorf("%w: %s", ErrGatewayLoop, net.JoinHostPort(host, strconv.Itoa(port)))
@@ -170,9 +193,10 @@ func (r *Resolver) lookupIPv4(ctx context.Context, host string, cred *session.Cr
 			return nil, ctx.Err()
 		}
 	}
-	if r.tunnel != nil && len(cred.DNS) > 0 {
+	if r.tunnel != nil && !r.disableTunnelDNS && len(cred.DNS) > 0 {
+		ctx = session.ExpectGeneration(ctx, cred.Generation)
 		scope := r.tunnelDNSScope(cred)
-		return r.tunnelDNS.lookup(ctx, host, scope, cred.DNS, func(ctx context.Context, network, address string) (net.Conn, error) {
+		result, lookupErr := r.tunnelDNS.lookup(ctx, host, scope, cred.DNS, func(ctx context.Context, network, address string) (net.Conn, error) {
 			server, _, err := net.SplitHostPort(address)
 			if err != nil {
 				return nil, err
@@ -193,6 +217,25 @@ func (r *Resolver) lookupIPv4(ctx context.Context, host string, cred *session.Cr
 			}
 			return r.tunnel.DialUDP(ctx, ip.String(), 53, appID, "")
 		})
+		if lookupErr == nil {
+			return result, nil
+		}
+		var dnsErr *net.DNSError
+		if errors.Is(lookupErr, errNoIPv4Answer) || (errors.As(lookupErr, &dnsErr) && dnsErr.IsNotFound) {
+			return nil, lookupErr
+		}
+		lastErr = lookupErr
+	}
+	if r.fallback != nil && ctx.Err() == nil {
+		answers, err := r.fallback(ctx, host)
+		if err != nil {
+			return nil, err
+		}
+		for _, ip := range answers {
+			if ip.Is4() && !IsFakeIP(net.IP(ip.AsSlice())) {
+				return net.IP(ip.AsSlice()), nil
+			}
+		}
 	}
 	return nil, lastErr
 }
@@ -284,4 +327,9 @@ func (r *Resolver) LookupHost(ctx context.Context, host string) ([]string, error
 		return nil, err
 	}
 	return []string{ip.String()}, nil
+}
+
+// NewController uses only controller DNS, with an explicit host fallback.
+func NewController(p session.CredentialProvider, t TunnelDialer, f func(context.Context, string) ([]netip.Addr, error), disabled bool) *Resolver {
+	return &Resolver{provider: p, tunnel: t, tunnelDNS: newDNSPool(), disableTunnelDNS: disabled, fallback: f}
 }

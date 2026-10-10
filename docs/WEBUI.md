@@ -324,7 +324,7 @@ sessionActive     → online
 
 | 字段 | 规则 |
 |---|---|
-| `device_id`、`client_type`、`proxy` | 静态配置，始终存在 |
+| `device_id`、`client_type`、`controller_host`、`proxy` | 静态配置，始终存在 |
 | `user`、`gateways`、`dns` | 仅 `sessionActive` 时存在（来自最近一次 `SessionInfo` 的深拷贝）；否则 null |
 | `since` | 最近一次**状态值**变化的时间 |
 | `last_error` | `login_failed` 设置；`login_start`、`login_success`、`restore_success` 清空 |
@@ -341,6 +341,7 @@ sessionActive     → online
   "user": { "username": "2020000000", "display_name": "张三", "client_ip": "10.0.0.2" },
   "device_id": "0123456789ABCDEF0123456789ABCDEF",
   "client_type": "client",
+  "controller_host": "vpn.shanghaitech.edu.cn",
   "gateways": ["119.78.254.241:441"],
   "dns": ["10.15.44.11"],
   "proxy": { "socks5": "127.0.0.1:1080", "http": "127.0.0.1:8080" },
@@ -476,17 +477,19 @@ web/
   src/
     main.tsx  App.tsx  api.ts  types.ts  errors.ts  styles.css
     components/
-      StatusCard.tsx   状态灯 + since + last_error
-      UserCard.tsx     用户信息 + device_id(复制按钮) + client_type + 代理入口
+      StatusCard.tsx   连接状态 + 登录操作 + last_error
+      UserCard.tsx     账号 + 控制器地址 + 连接详情弹窗
+      ProxyCards.tsx   SOCKS5/HTTP 地址 + 复制按钮
+      ThemeToggle.tsx  图标主题菜单：浅色/深色/跟随系统
       SmsDialog.tsx    弹窗:6 位输入、60s 倒计时、重新发送、错误内联
       TrustDevices.tsx 表格 + 绑定/取消授信/注销;browser 模式仅禁用「绑定本机」
-      EventsList.tsx   最近事件流(新→旧)
+      EventsList.tsx   最近 10 条活动 + 完整记录弹窗
       ErrorText.tsx    错误摘要 + 「详情」展开原始错误链
 ```
 
 - `package-lock.json` 提交到 git（`npm ci` 可重现构建）。
 - 数据层 `api.ts`：fetch + `EventSource`；单例 store（`useSyncExternalStore`），不引入状态库。
-- 无路由，单页。UI 文案中文。样式手写 CSS，深浅色按 `prefers-color-scheme`。
+- 无路由，单页。UI 文案中文。界面使用 shadcn/ui（Radix）和 Tailwind CSS；图标主题菜单支持浅色、深色、跟随系统，并持久保存选择。
 - 短信弹窗：`state === "sms_required"` 时自动弹出、输入框自动聚焦；提交时携带当前 `sms_gen`；提交后进入"验证中"等待状态推送；60 秒倒计时仅作提示（客户端计时）。重发发现认证会话过期时显示正在重建会话，旧代关闭后由新 `sms_gen` 重置表单并接收新验证码。
 - 错误展示 `errors.ts`：后端传来的是 Go 错误链（`check sms code: sdpc checkSms: code 75500403: 验证码错误`），
   直接渲染会让面板显得像坏了。`friendlyError()` 依次尝试：控制面错误码表（TECHNICAL.md §11.1）→ 网络/TLS 特征 →
@@ -494,7 +497,7 @@ web/
   未收录的错误码（如 75500403）不臆造语义，直接采用控制器自己的中文消息。
   一次性 API 请求的错误经 `api.ts` 的 `errorText()` 处理：调用处按状态码覆盖 → 面板自身拒绝（400/403/404/405）的中文默认文案 →
   `friendlyError()` 摘要 → 兜底文案。完全不含中文的错误链不作为摘要显示，改用调用处的中文兜底文案；原文一律放进「详情」。
-- 连接断开时状态灯置灰并停止呼吸动画（`.pill.stale`）：快照已不再刷新，绿灯不能继续冒充实时。
+- 面板连接断开时显示离线状态和重连提示，并禁用会改变会话或设备的操作。
 - 授信终端在 browser 模式下**不整卡禁用**：服务端只拒绝绑定（`handleTrustBind` 的 `client_type` 前置检查，
   对应控制器 75500000），查询/取消授信/注销在任何会话都可用。实测 browser 会话 `GET /api/trust-devices`
   返回 200 且 `selfId` 就在列表里——纯 web 登录同样会被记为授信终端。因此只禁用「绑定当前设备」按钮，
@@ -548,7 +551,7 @@ build: web
 
 ### 9.3 页面布局
 
-单栏卡片流，最大宽度 960px 居中：顶栏（标题 + 状态灯：绿 online / 黄 connecting、sms_required / 灰 offline）→ `StatusCard`（含 `重新登录` 按钮，二次确认；409 时提示已有登录正在进行）+ `UserCard`（并排，窄屏堆叠）→ `TrustDevices`（browser 模式附说明）→ `EventsList`。`SmsDialog` 全局弹窗，优先级最高。
+单栏卡片流，最大宽度 1160px 居中：顶栏（品牌、面板服务状态、主题菜单）→ `StatusCard`（含 `重新登录` 按钮，二次确认；409 时提示已有登录正在进行）+ `UserCard`（并排，窄屏堆叠）→ `ProxyCards` → `TrustDevices`（browser 模式附说明）→ `EventsList`。`SmsDialog` 全局弹窗，优先级最高。
 
 ## 10. 测试计划
 

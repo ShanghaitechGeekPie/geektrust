@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/ShanghaitechGeekPie/geektrust/compatibility"
 	"io"
 	"net"
 	"strconv"
@@ -16,7 +17,7 @@ import (
 	"syscall"
 	"time"
 
-	"geektrust/internal/session"
+	"github.com/ShanghaitechGeekPie/geektrust/internal/session"
 )
 
 const (
@@ -62,6 +63,19 @@ type tcpAuthRequest struct {
 		} `json:"application"`
 	} `json:"env"`
 	XRequestSig string `json:"xRequestSig"`
+}
+
+// TCPAuthError is an explicit gateway authentication rejection. It is terminal
+// across both gateway selection and stream-to-L3 compatibility fallback.
+type TCPSetupError struct{ Err error }
+
+func (e *TCPSetupError) Error() string { return "TCP stream setup: " + e.Err.Error() }
+func (e *TCPSetupError) Unwrap() error { return e.Err }
+
+type TCPAuthError struct{ Code int64 }
+
+func (e *TCPAuthError) Error() string {
+	return fmt.Sprintf("direct TCP protocol rejected request: code %d", e.Code)
 }
 
 // TCPStatusError is the gateway's SOCKS-style result for opening the target.
@@ -115,16 +129,21 @@ func ShouldFallbackToL3(err error) bool {
 	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
 	}
-	var status *TCPStatusError
-	if !errors.As(err, &status) {
-		return true
-	}
-	switch status.Status {
-	case 0x03, 0x04, 0x05, 0x06:
+	var setup *TCPSetupError
+	if !errors.As(err, &setup) {
 		return false
-	default:
-		return true
 	}
+	var rejected *TCPAuthError
+	if errors.As(err, &rejected) {
+		return false
+	}
+	var status *TCPStatusError
+	if errors.As(err, &status) {
+		return status.Status == 0x07 || status.Status == 0x08
+	}
+	// Only incomplete setup exchanges can indicate an unsupported stream path.
+	// TLS verification, authentication rejection and unknown failures are terminal.
+	return (errors.Is(setup.Err, io.EOF) || errors.Is(setup.Err, io.ErrUnexpectedEOF))
 }
 
 // DialTCP opens an aTrust TCP proxy connection. TCP uses the server's stream
@@ -164,10 +183,14 @@ func (m *Manager) DialTCP(ctx context.Context, ip string, port int, appID, domai
 			m.logger.Debug("direct TCP tunnel established", "addr", addr, "target", net.JoinHostPort(ip, strconv.Itoa(port)))
 			return tunneled, nil
 		}
-		lastErr = err
+		lastErr = &TCPSetupError{Err: err}
+		var rejected *TCPAuthError
+		if errors.As(err, &rejected) {
+			return nil, err
+		}
 		var status *TCPStatusError
 		if errors.As(err, &status) && status.Status != 0x01 {
-			return nil, err
+			return nil, lastErr
 		}
 		lines.ReportFailure(addr)
 		m.logger.Debug("direct TCP line failed", "addr", addr, "err", err)
@@ -259,6 +282,14 @@ func buildTCPRequest(cred *session.Credential, ip string, port int, appID, domai
 		processName, processPath = "ssh", "/usr/bin/ssh"
 		fingerprint = fmt.Sprintf("%X", sha256.Sum256([]byte(processPath)))
 	}
+	processPlatform := "Linux"
+	if identity := cred.ProcessIdentity; identity != nil {
+		if err := (compatibility.Options{Protocol: compatibility.ProtocolOptions{Process: identity}}).Validate(); err != nil {
+			return nil, err
+		}
+		processName, processPath, processPlatform = identity.Name, identity.Path, identity.Platform
+		fingerprint = fmt.Sprintf("%X", sha256.Sum256([]byte(processPath)))
+	}
 	req := tcpAuthRequest{
 		SID: cred.SID, AppID: appID, URL: "tcp://" + dest,
 		DeviceID: cred.DeviceID, ConnectionID: connectionID,
@@ -266,7 +297,7 @@ func buildTCPRequest(cred *session.Credential, ip string, port int, appID, domai
 	}
 	p := &req.Env.Application.Runtime.Process
 	*p = tcpProcess{
-		Name: processName, DigitalSignature: "TrustAppClosed", Platform: "Linux",
+		Name: processName, DigitalSignature: "TrustAppClosed", Platform: processPlatform,
 		Fingerprint: fingerprint, Description: "TrustAppClosed", Path: processPath,
 		Version: "TrustAppClosed", SecurityEnv: "normal",
 	}
@@ -330,18 +361,25 @@ func readTCPProtocolResponse(reader io.Reader) error {
 	if _, err := io.ReadFull(reader, body); err != nil {
 		return fmt.Errorf("direct TCP protocol response: %w", err)
 	}
+	return parseTCPProtocolResponse(body)
+}
+
+func parseTCPProtocolResponse(body []byte) error {
 	if string(body) == "OK" {
 		return nil
 	}
 	var response struct {
-		Code    int64  `json:"code"`
+		Code    *int64 `json:"code"`
 		Message string `json:"message"`
 	}
 	if err := json.Unmarshal(body, &response); err != nil {
 		return fmt.Errorf("decode direct TCP protocol response: %w", err)
 	}
-	if response.Code != 0 {
-		return fmt.Errorf("direct TCP protocol rejected request: code %d: %s", response.Code, response.Message)
+	if response.Code == nil {
+		return errors.New("direct TCP protocol response missing code")
+	}
+	if *response.Code != 0 {
+		return &TCPAuthError{Code: *response.Code}
 	}
 	return nil
 }
@@ -385,9 +423,11 @@ type tcpTunnelConn struct {
 	conn   net.Conn
 	reader *bufio.Reader
 
-	readMu  sync.Mutex
-	readBuf []byte
-	writeMu sync.Mutex
+	readMu        sync.Mutex
+	readRemaining int
+	readControl   []byte
+	readClosed    bool
+	writeMu       sync.Mutex
 	// writeClosed is protected by writeMu. The protocol close frame half-closes
 	// the target write direction while the TLS connection remains readable.
 	writeClosed   bool
@@ -403,48 +443,66 @@ func (c *tcpTunnelConn) Read(p []byte) (int, error) {
 	}
 	c.readMu.Lock()
 	defer c.readMu.Unlock()
-	if len(c.readBuf) > 0 {
-		n := copy(p, c.readBuf)
-		c.readBuf = c.readBuf[n:]
-		return n, nil
+	if c.readClosed {
+		return 0, io.EOF
 	}
 	for {
-		var header [2]byte
-		if _, err := io.ReadFull(c.reader, header[:]); err != nil {
+		if c.readControl != nil {
+			offset := len(c.readControl) - c.readRemaining
+			n, err := io.ReadFull(c.reader, c.readControl[offset:])
+			c.readRemaining -= n
+			if err != nil {
+				if err == io.EOF && c.readRemaining > 0 {
+					err = io.ErrUnexpectedEOF
+				}
+				return 0, err
+			}
+			err = parseTCPProtocolResponse(c.readControl)
+			c.readControl = nil
+			if err != nil {
+				return 0, err
+			}
+			continue
+		}
+		if c.readRemaining > 0 {
+			n, err := c.reader.Read(p[:min(len(p), c.readRemaining)])
+			c.readRemaining -= n
+			if err == io.EOF && c.readRemaining > 0 {
+				err = io.ErrUnexpectedEOF
+			}
+			return n, err
+		}
+		// Peek retains a partial header across a retryable read timeout.
+		header, err := c.reader.Peek(2)
+		if err != nil {
+			if err == io.EOF && len(header) > 0 {
+				err = io.ErrUnexpectedEOF
+			}
 			return 0, err
 		}
-		switch header {
+		kind := [2]byte{header[0], header[1]}
+		if kind != [2]byte{0x01, 0x00} && kind != [2]byte{0x01, 0x01} && kind != [2]byte{0x53, 0x00} {
+			return 0, fmt.Errorf("unexpected direct TCP frame 0x%02x 0x%02x", header[0], header[1])
+		}
+		header, err = c.reader.Peek(4)
+		if err != nil {
+			if err == io.EOF {
+				err = io.ErrUnexpectedEOF
+			}
+			return 0, err
+		}
+		switch kind {
 		case [2]byte{0x01, 0x00}:
-			var length [2]byte
-			if _, err := io.ReadFull(c.reader, length[:]); err != nil {
-				return 0, err
-			}
-			frameLength := int(binary.BigEndian.Uint16(length[:]))
-			if frameLength == 0 {
-				continue
-			}
-			if frameLength <= len(p) {
-				return io.ReadFull(c.reader, p[:frameLength])
-			}
-			data := make([]byte, frameLength)
-			if _, err := io.ReadFull(c.reader, data); err != nil {
-				return 0, err
-			}
-			n := copy(p, data)
-			c.readBuf = data[n:]
-			return n, nil
+			c.readRemaining = int(binary.BigEndian.Uint16(header[2:4]))
+			c.reader.Discard(4)
 		case [2]byte{0x01, 0x01}:
-			var trailer [2]byte
-			if _, err := io.ReadFull(c.reader, trailer[:]); err != nil {
-				return 0, err
-			}
+			c.reader.Discard(4)
+			c.readClosed = true
 			return 0, io.EOF
 		case [2]byte{0x53, 0x00}:
-			if err := readTCPProtocolResponse(c.reader); err != nil {
-				return 0, err
-			}
-		default:
-			return 0, fmt.Errorf("unexpected direct TCP frame 0x%02x 0x%02x", header[0], header[1])
+			c.readRemaining = int(binary.BigEndian.Uint16(header[2:4]))
+			c.readControl = make([]byte, c.readRemaining)
+			c.reader.Discard(4)
 		}
 	}
 }
@@ -465,8 +523,12 @@ func (c *tcpTunnelConn) Write(p []byte) (int, error) {
 		frame[0], frame[1] = 0x01, 0x00
 		binary.BigEndian.PutUint16(frame[2:4], uint16(size))
 		copy(frame[4:], p[:size])
-		if err := writeTCPFrame(c.conn, frame); err != nil {
-			return written, err
+		n, err := writeTCPFrame(c.conn, frame)
+		if err != nil {
+			// A partial frame cannot be resumed with a new header.
+			c.writeClosed, c.closeWriteErr = true, err
+			c.conn.Close()
+			return written + max(0, n-4), err
 		}
 		written += size
 		p = p[size:]
@@ -474,20 +536,22 @@ func (c *tcpTunnelConn) Write(p []byte) (int, error) {
 	return written, nil
 }
 
-func writeTCPFrame(w io.Writer, frame []byte) error {
+func writeTCPFrame(w io.Writer, frame []byte) (int, error) {
+	written := 0
 	for len(frame) > 0 {
 		n, err := w.Write(frame)
 		if n > 0 {
+			written += n
 			frame = frame[n:]
 		}
 		if err != nil {
-			return err
+			return written, err
 		}
 		if n == 0 {
-			return io.ErrNoProgress
+			return written, io.ErrNoProgress
 		}
 	}
-	return nil
+	return written, nil
 }
 
 // CloseWrite sends the stream close frame without closing the TLS socket, so
@@ -495,18 +559,31 @@ func writeTCPFrame(w io.Writer, frame []byte) error {
 func (c *tcpTunnelConn) CloseWrite() error {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
+	return c.closeWriteLocked()
+}
+
+func (c *tcpTunnelConn) closeWriteLocked() error {
 	if c.writeClosed {
 		return c.closeWriteErr
 	}
 	c.writeClosed = true
 	_ = c.conn.SetWriteDeadline(time.Now().Add(tcpCloseTimeout))
-	c.closeWriteErr = writeTCPFrame(c.conn, []byte{0x01, 0x01, 0x00, 0x00})
+	_, c.closeWriteErr = writeTCPFrame(c.conn, []byte{0x01, 0x01, 0x00, 0x00})
+	if c.closeWriteErr != nil {
+		c.conn.Close()
+	}
 	return c.closeWriteErr
 }
 
 func (c *tcpTunnelConn) Close() error {
 	c.closeOnce.Do(func() {
-		writeErr := c.CloseWrite()
+		// Close must unblock a Write waiting on the socket. Send a graceful
+		// close frame only when no writer currently owns the framed stream.
+		var writeErr error
+		if c.writeMu.TryLock() {
+			writeErr = c.closeWriteLocked()
+			c.writeMu.Unlock()
+		}
 		closeErr := c.conn.Close()
 		if writeErr != nil {
 			c.closeErr = writeErr

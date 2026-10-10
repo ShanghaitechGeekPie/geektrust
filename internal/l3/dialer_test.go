@@ -3,6 +3,7 @@ package l3
 import (
 	"context"
 	"errors"
+	"github.com/ShanghaitechGeekPie/geektrust/internal/session"
 	"io"
 	"log/slog"
 	"net"
@@ -35,6 +36,8 @@ func TestShouldRetryDial(t *testing.T) {
 		{name: "line switch", err: &AuthRejectedError{Code: 1001, SwitchLine: true}, want: true},
 		{name: "persistent rejection", err: &AuthRejectedError{Code: 10000005}, want: false},
 		{name: "connection refused", err: syscall.ECONNREFUSED, want: false},
+		{name: "session replaced", err: session.ErrSessionReplaced, want: false},
+		{name: "cancelled", err: context.Canceled, want: false},
 		{name: "handshake timeout", err: context.DeadlineExceeded, want: true},
 	}
 	for _, tc := range cases {

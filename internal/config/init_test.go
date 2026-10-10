@@ -58,7 +58,10 @@ func TestInitializeDefaultsAndPreservesExistingConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	webBlock := "[web]\nenabled = true\nlisten = \"" + DefaultWebListen + "\""
+	if !strings.Contains(string(raw), "state_file =") || strings.Contains(string(raw), "legacy_state") {
+		t.Fatal("init did not emit only storage.state_file")
+	}
+	webBlock := "config_version = 2"
 	if !strings.Contains(string(raw), webBlock) {
 		t.Errorf("rendered config missing complete [web] block:\n%s", raw)
 	}

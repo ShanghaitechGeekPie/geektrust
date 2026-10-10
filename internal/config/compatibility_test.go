@@ -3,43 +3,37 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
-func TestLegacyShanghaiTechConfig(t *testing.T) {
-	for _, body := range []string{
-		"keystore = 'synthetic.keystore'\n",
-		"keystore = 'synthetic.keystore'\ndevice_id = '0123456789ABCDEF0123456789ABCDEF'\nclient_type = 'client'\ngateways = ['gateway.example']\ndns = ['10.0.0.53']\n",
-	} {
-		path := filepath.Join(t.TempDir(), "config.toml")
-		if err := os.WriteFile(path, []byte(body), 0600); err != nil {
-			t.Fatal(err)
-		}
-		c, err := Load(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if c.AppID != DefaultAppID || c.LoginDomain != DefaultLoginDomain || c.GatewayServerName() != "vpn.shanghaitech.edu.cn" {
-			t.Fatalf("legacy defaults lost: app=%s login=%s", c.AppID, c.LoginDomain)
-		}
-		after, err := os.ReadFile(path)
-		if err != nil || string(after) != body {
-			t.Fatal("loading changed the original configuration")
-		}
+func TestRejectUnreleasedCompatibilitySection(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(p, []byte("keystore='fixture'\n[compatibility]\nfallback_app_id='old'\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(p); err == nil {
+		t.Fatal("unreleased compatibility format retained")
 	}
 }
-
-func TestControllerDefaultsAreScoped(t *testing.T) {
-	c := &Config{BaseURL: DefaultBaseURL, AppID: "custom-app", LoginDomain: "custom-domain"}
-	c.ApplyControllerDefaults()
-	if c.AppID != "custom-app" || c.LoginDomain != "custom-domain" {
-		t.Fatal("explicit settings were overwritten")
+func TestGeneratedConfigDefaultsToShanghaiTech(t *testing.T) {
+	cfg, e := PrepareInitialConfig(InitOptions{})
+	if e != nil {
+		t.Fatal(e)
 	}
-	for _, base := range []string{"https://vpn.ecnu.edu.cn", "https://vpn.shanghaitech.edu.cn.invalid"} {
-		c = &Config{BaseURL: base}
-		c.ApplyControllerDefaults()
-		if c.AppID != "" || c.LoginDomain != "" || c.GatewayServerName() != "" {
-			t.Fatal("ShanghaiTech defaults leaked to another controller")
-		}
+	p := filepath.Join(t.TempDir(), "config.toml")
+	b := renderInitialConfig(cfg)
+	if !strings.Contains(string(b), "config_version = 2") {
+		t.Fatal("init did not generate v2")
+	}
+	if e = os.WriteFile(p, b, 0600); e != nil {
+		t.Fatal(e)
+	}
+	v, e := Load(p)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if v.GatewayServerName() != "vpn.shanghaitech.edu.cn" || !v.Fallbacks.StreamToL3 {
+		t.Fatal("minimal ShanghaiTech defaults missing")
 	}
 }

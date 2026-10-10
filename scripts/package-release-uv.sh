@@ -44,7 +44,7 @@ downloads="$package_tmp/downloads"
 mkdir -p "$base_output" "$downloads"
 
 # Build the base packages first so Go build flags stay in package-release.sh.
-# Keep the target list below in sync with that script.
+# Both packagers load the same product target list.
 bash scripts/package-release.sh "$version" "$base_output"
 
 uv_release_url="https://releases.astral.sh/github/uv/releases/download/$uv_version"
@@ -82,14 +82,7 @@ curl "${curl_args[@]}" --output "$license_dir/LICENSE-MIT" \
 curl "${curl_args[@]}" --output "$license_dir/LICENSE-APACHE" \
   "https://raw.githubusercontent.com/astral-sh/uv/$uv_version/LICENSE-APACHE"
 
-targets=(
-  linux/amd64
-  linux/arm64
-  darwin/amd64
-  darwin/arm64
-  windows/amd64
-  windows/arm64
-)
+source "$repo_root/scripts/release-targets.sh"
 
 for target in "${targets[@]}"; do
   goos=${target%/*}

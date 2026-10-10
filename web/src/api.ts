@@ -6,8 +6,8 @@ import { friendlyError, type FriendlyError } from "./errors";
 // Live store. The SSE stream feeds full snapshots; a one-shot /api/status
 // fetch seeds the first paint and is discarded once stream data exists, so a
 // slow fetch can never overwrite fresher data. `connected` mirrors the SSE
-// link so the UI can flag stale data instead of presenting a dead process as
-// "online".
+// freshness so the UI cannot enable actions before a reconnected stream has
+// delivered its current snapshot.
 
 export interface PanelStore {
   snap: Snapshot | null;
@@ -17,20 +17,19 @@ export interface PanelStore {
 let store: PanelStore = { snap: null, connected: false };
 const listeners = new Set<() => void>();
 let sawStream = false;
-let reconnectTimer: number | undefined;
+let stream: EventSource | undefined;
+let streamEpoch = 0;
 
 function publish(next: PanelStore) {
   store = next;
   listeners.forEach((l) => l());
 }
 
-function connect() {
-  reconnectTimer = undefined;
+function connect(epoch: number) {
   const es = new EventSource("/api/events");
-  es.onopen = () => {
-    if (!store.connected) publish({ ...store, connected: true });
-  };
+  stream = es;
   es.onmessage = (e) => {
+    if (epoch !== streamEpoch) return;
     let snap: Snapshot;
     try {
       snap = JSON.parse(e.data) as Snapshot;
@@ -41,38 +40,46 @@ function connect() {
     publish({ snap, connected: true });
   };
   es.onerror = () => {
-    // Rebuild the stream ourselves: EventSource stops retrying once closed,
-    // and the UI needs an explicit "disconnected" signal either way.
-    es.close();
+    if (epoch !== streamEpoch) return;
+    // EventSource retries the connection itself.
     if (store.connected) publish({ ...store, connected: false });
-    if (reconnectTimer === undefined) {
-      reconnectTimer = window.setTimeout(connect, 2000);
-    }
   };
 }
 
-async function seed() {
+async function seed(epoch: number) {
   try {
     const resp = await fetch("/api/status");
     if (!resp.ok) return;
     const snap = (await resp.json()) as Snapshot;
-    if (!sawStream) publish({ ...store, snap });
+    if (epoch === streamEpoch && !sawStream) publish({ ...store, snap });
   } catch {
     // the SSE loop owns retries
   }
 }
 
-connect();
-void seed();
+
+
+function subscribePanel(cb: () => void) {
+  listeners.add(cb);
+  if (listeners.size === 1) {
+    sawStream = false;
+    const epoch = ++streamEpoch;
+    connect(epoch);
+    void seed(epoch);
+  }
+  return () => {
+    listeners.delete(cb);
+    if (listeners.size === 0) {
+      streamEpoch++;
+      stream?.close();
+      stream = undefined;
+      store = { ...store, connected: false };
+    }
+  };
+}
 
 export function usePanelStore(): PanelStore {
-  return useSyncExternalStore(
-    (cb) => {
-      listeners.add(cb);
-      return () => listeners.delete(cb);
-    },
-    () => store,
-  );
+  return useSyncExternalStore(subscribePanel, () => store);
 }
 
 // ---------------------------------------------------------------------------

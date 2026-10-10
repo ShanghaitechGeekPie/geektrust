@@ -10,9 +10,8 @@ import (
 	"io"
 	"net/url"
 	"os"
-	"path/filepath"
 
-	"geektrust/internal/privatefile"
+	"github.com/ShanghaitechGeekPie/geektrust/internal/storage"
 )
 
 // keystoreMagic prefixes every default-format keystore file
@@ -41,7 +40,7 @@ func LoadKeystore(path string) (*Keystore, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read keystore: %w", err)
 	}
-	k, err := ParseKeystore(blob, func(data []byte) error { return writeFileAtomic(path, data, 0o600) })
+	k, err := ParseKeystore(blob, func(data []byte) error { return storage.WriteAtomic(path, data, false) })
 	if err == nil {
 		k.path = path
 	}
@@ -97,7 +96,7 @@ func (k *Keystore) validate() error {
 		}
 	}
 	u, err := url.Parse(k.BaseURL())
-	if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
+	if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.ForceQuery || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
 		return fmt.Errorf("credential base_url must be an HTTPS origin")
 	}
 	if !rpIDMatchesOrigin(k.RpID(), k.BaseURL()) {
@@ -220,7 +219,7 @@ func (k *Keystore) Save() error {
 		return fmt.Errorf("credential persistence is required")
 	}
 	if save == nil {
-		save = func(data []byte) error { return writeFileAtomic(k.path, data, 0o600) }
+		save = func(data []byte) error { return storage.WriteAtomic(k.path, data, false) }
 	}
 	if err := save(buf.Bytes()); err != nil {
 		return fmt.Errorf("write keystore: %w", err)
@@ -239,36 +238,4 @@ func marshalNoEscape(v any) ([]byte, error) {
 		return nil, err
 	}
 	return bytes.TrimRight(buf.Bytes(), "\n"), nil
-}
-
-// writeFileAtomic writes data to a temp file in the same directory and renames
-// it over path, so a crash never leaves a half-written secret file.
-func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
-	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, ".keystore-*.tmp")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
-	if err := privatefile.Protect(tmpName); err != nil {
-		tmp.Close()
-		return err
-	}
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Chmod(perm); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmpName, path)
 }

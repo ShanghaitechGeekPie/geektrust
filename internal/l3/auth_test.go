@@ -2,15 +2,18 @@ package l3
 
 import (
 	"crypto/md5"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"net"
 	"strings"
 	"testing"
+
+	"github.com/ShanghaitechGeekPie/geektrust/compatibility"
 )
 
 func TestBuildAuthRequestIPShape(t *testing.T) {
-	body, err := buildAuthRequestIP("sid", "681165d0-1c77-11ed-8650-cd35a51aa42a", "84B5B45FE73EC0036C3E97717308447F", "10.15.45.163", 443, net.IPv4(10, 19, 240, 43).To4(), 30001, 1, "", protocolTCP)
+	body, err := buildAuthRequestIP("sid", "681165d0-1c77-11ed-8650-cd35a51aa42a", "84B5B45FE73EC0036C3E97717308447F", "10.15.45.163", 443, net.IPv4(10, 19, 240, 43).To4(), 30001, 1, "", protocolTCP, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,7 +90,7 @@ func TestBuildAuthRequestIPShape(t *testing.T) {
 
 	// domain is omitted when empty; when set it sits between ip and procHash.
 	withDomain, err := buildAuthRequestIP("sid", "app", "84B5B45FE73EC0036C3E97717308447F",
-		"180.101.49.44", 443, net.IPv4(10, 19, 240, 43).To4(), 30002, 2, "www.baidu.com", protocolTCP)
+		"180.101.49.44", 443, net.IPv4(10, 19, 240, 43).To4(), 30002, 2, "www.baidu.com", protocolTCP, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +131,7 @@ func TestBuildAuthRequestIPShape(t *testing.T) {
 
 func TestBuildAuthRequestIPUDP(t *testing.T) {
 	body, err := buildAuthRequestIP("sid", "app", "device", "10.13.87.17", 53,
-		net.IPv4(10, 19, 240, 43).To4(), 30001, 1, "", protocolUDP)
+		net.IPv4(10, 19, 240, 43).To4(), 30001, 1, "", protocolUDP, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,7 +148,7 @@ func TestBuildAuthRequestIPUDP(t *testing.T) {
 }
 
 func TestBuildAuthRequestICMP(t *testing.T) {
-	body, err := buildAuthRequestIP("sid", "app", "device", "192.0.2.1", 0, net.IPv4(10, 0, 0, 1), 0, 1, "", protocolICMP)
+	body, err := buildAuthRequestIP("sid", "app", "device", "192.0.2.1", 0, net.IPv4(10, 0, 0, 1), 0, 1, "", protocolICMP, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -158,5 +161,22 @@ func TestBuildAuthRequestICMP(t *testing.T) {
 	}
 	if _, err := protocolName(255); err == nil {
 		t.Fatal("unknown protocol accepted")
+	}
+}
+
+func TestConfiguredProcessIdentity(t *testing.T) {
+	identity := &compatibility.ProcessMetadata{Name: "custom-client", Platform: "Windows", Path: "custom-client.exe"}
+	body, err := buildAuthRequestIP("sid", "app", "device", "192.0.2.1", 443, net.IPv4(10, 0, 0, 1), 30000, 1, "", protocolTCP, identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var request authRequestIP
+	if err := json.Unmarshal(body, &request); err != nil {
+		t.Fatal(err)
+	}
+	process := request.Env.Application.Runtime.Process
+	fingerprint := fmt.Sprintf("%X", sha256.Sum256([]byte(identity.Path)))
+	if process.Name != identity.Name || process.Platform != identity.Platform || process.Path != identity.Path || process.Fingerprint != fingerprint || request.ProcHash != fingerprint {
+		t.Fatal("configured identity not used consistently")
 	}
 }

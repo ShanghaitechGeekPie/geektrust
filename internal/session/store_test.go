@@ -10,7 +10,7 @@ import (
 
 func TestStoreRoundTrip(t *testing.T) {
 	dir := t.TempDir()
-	st := NewStore(filepath.Join(dir, "state.enc"))
+	st := NewStore(filepath.Join(dir, "state.enc"), false)
 
 	// No file yet → (nil, nil).
 	got, err := st.Load(context.Background())
@@ -76,7 +76,7 @@ func TestStoreRoundTrip(t *testing.T) {
 
 func TestStoreWrongKey(t *testing.T) {
 	dir := t.TempDir()
-	st := NewStore(filepath.Join(dir, "state.enc"))
+	st := NewStore(filepath.Join(dir, "state.enc"), false)
 	if err := st.Save(context.Background(), &State{SID: "s"}); err != nil {
 		t.Fatal(err)
 	}
@@ -95,7 +95,7 @@ func TestStoreInvalidKeyNotOverwritten(t *testing.T) {
 	if err := os.WriteFile(keyPath, []byte("short"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	st := NewStore(filepath.Join(dir, "state.enc"))
+	st := NewStore(filepath.Join(dir, "state.enc"), false)
 	if err := st.Save(context.Background(), &State{SID: "s"}); err == nil {
 		t.Fatal("Save must fail on a present-but-invalid key file, not regenerate it")
 	}

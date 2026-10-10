@@ -11,31 +11,43 @@ import (
 	"sync"
 	"time"
 
-	"geektrust/internal/config"
-	"geektrust/internal/idsauth"
-	"geektrust/internal/sdpc"
+	"github.com/ShanghaitechGeekPie/geektrust/auth"
+	"github.com/ShanghaitechGeekPie/geektrust/compatibility"
+	"github.com/ShanghaitechGeekPie/geektrust/internal/sdpc"
+	"github.com/ShanghaitechGeekPie/geektrust/internal/settings"
 )
 
 // errSMSAuthSessionExpired marks an expiration discovered after the user has
 // entered the SMS wait. login catches it and rebuilds the whole IDS/controller
 // authentication chain instead of publishing a terminal login failure.
+var ErrIdentityAuthentication = errors.New("identity authentication rejected")
+
+var ErrStateStorage = errors.New("session storage failure")
+
 var errSMSAuthSessionExpired = errors.New("SMS authentication session expired")
 
 // Credential is everything the tunnel and resolver need from a live session.
 type Credential struct {
+	controller            *sdpc.Client
+	Lifetime              context.Context
+	Generation            uint64
+	LegacyGatewayOverride bool
+	ProcessIdentity       *compatibility.ProcessMetadata
 	// AppID is the legacy fallback; matched resource rules always take priority.
-	AppID           string
-	LegacyRouting   bool
-	GatewayOverride bool
-	Original        *Credential
-	SID             string
-	DeviceID        string
-	Username        string
-	ConnectionID    string
-	CsrfToken       string
-	Cookies         []*http.Cookie
-	Gateways        []string
-	DNS             []string
+	AppID                       string
+	MissingGatewayGroupFallback bool
+	GatewayOverride             bool
+	AllowTCPFallback            bool
+	Original                    *Credential
+	SID                         string
+	DeviceID                    string
+	Username                    string
+	DisplayName                 string
+	ConnectionID                string
+	CsrfToken                   string
+	Cookies                     []*http.Cookie
+	Gateways                    []string
+	DNS                         []string
 	// Policy is the full routing policy (domain/IP/CIDR × port → appId)
 	// from clientResource.
 	Policy *sdpc.Resource
@@ -62,19 +74,24 @@ type CredentialProvider interface {
 // credentials, restoring a persisted session or re-logging in silently
 // when the controller does not request SMS.
 type Provider struct {
-	cfg          *config.Config
-	logger       *slog.Logger
-	prompt       SMSPrompter
-	smsHandler   SMSHandler // set by SetSMSHandler during web wiring
-	store        StateStore
-	Authenticate func(context.Context, *http.Client) (string, error)
-	Transport    http.RoundTripper
+	cfg              *settings.Session
+	logger           *slog.Logger
+	prompt           SMSPrompter
+	smsHandler       SMSHandler // set by SetSMSHandler during web wiring
+	store            StateStore
+	Authenticate     func(context.Context, *http.Client) (string, error)
+	ChallengeHandler auth.Handler
+	Transport        http.RoundTripper
+	HTTPTimeout      time.Duration
 
-	mu         sync.Mutex
-	cur        *Credential
-	sdpc       *sdpc.Client // last client, for liveness checks
-	refreshing *refreshCall
-	forceLogin bool // set by Invalidate; skips restore on the next refresh
+	mu            sync.Mutex
+	cur           *Credential
+	refreshing    *refreshCall
+	generation    uint64
+	revision      uint64
+	cancelSession context.CancelFunc
+	closed        bool
+	forceLogin    bool // rejected caches stay disabled until a new session is published
 
 	dispMu      sync.Mutex
 	dispCond    *sync.Cond // lazily created on first AddObserver
@@ -88,46 +105,30 @@ type Provider struct {
 // refreshCall is one in-flight restore/login shared by every concurrent
 // caller: all waiters block on done and then read the same result.
 type refreshCall struct {
-	done    chan struct{} // closed once cred/err are populated
-	cred    *Credential
-	err     error
-	waiters int // joined callers (observability for tests; guarded by p.mu)
-	leader  context.Context
+	revision uint64
+	forced   bool
+	done     chan struct{} // closed once cred/err are populated
+	cred     *Credential
+	err      error
+	leader   context.Context
 }
 
 // NewProvider builds a credential provider. prompt may be nil; a login that
 // requires SMS then returns an error.
-func NewProvider(cfg *config.Config, logger *slog.Logger, prompt SMSPrompter) *Provider {
-	normalized := *cfg
-	normalized.ApplyControllerDefaults()
-	cfg = &normalized
+func NewProvider(normalized settings.Session, logger *slog.Logger, prompt SMSPrompter) *Provider {
+	normalized.Gateways = append([]string(nil), normalized.Gateways...)
+	normalized.DNS = append([]string(nil), normalized.DNS...)
+	normalized.Fallbacks.Gateways = append([]string(nil), normalized.Fallbacks.Gateways...)
+	if normalized.Process != nil {
+		value := *normalized.Process
+		normalized.Process = &value
+	}
+	cfg := &normalized
 	return &Provider{
 		cfg:    cfg,
 		logger: logger,
 		prompt: prompt,
-		store:  NewStore(cfg.StateFile),
 	}
-}
-
-// SDPCClient returns the controller client from the last successful login,
-// or nil if no session has been established. Callers must not cache it: a
-// re-login may replace it at any time.
-func (p *Provider) SDPCClient() *sdpc.Client {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.sdpc
-}
-
-// ActiveSDPC returns the controller client only while a credential is
-// active. Invalidate clears cur but keeps the last client, so SDPCClient
-// can be stale; this method cannot.
-func (p *Provider) ActiveSDPC() *sdpc.Client {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.cur == nil {
-		return nil
-	}
-	return p.sdpc
 }
 
 // SetSMSHandler replaces the simple SMSPrompter with a resend-capable
@@ -203,22 +204,37 @@ func (p *Provider) Credential(ctx context.Context) (*Credential, error) {
 			return nil, err
 		}
 		p.mu.Lock()
+		if err := ctx.Err(); err != nil {
+			p.mu.Unlock()
+			return nil, err
+		}
+		if p.closed {
+			p.mu.Unlock()
+			return nil, context.Canceled
+		}
 		if p.cur != nil {
+			if g, ok := ctx.Value(expectedGenerationKey{}).(uint64); ok && g != p.cur.Generation {
+				p.mu.Unlock()
+				return nil, ErrSessionReplaced
+			}
 			cred := p.cur
 			p.mu.Unlock()
 			return cred, nil
 		}
+		if _, ok := ctx.Value(expectedGenerationKey{}).(uint64); ok {
+			p.mu.Unlock()
+			return nil, ErrSessionReplaced
+		}
 		call := p.refreshing
 		if call == nil {
-			call = &refreshCall{done: make(chan struct{}), leader: ctx}
+			call = &refreshCall{done: make(chan struct{}), leader: ctx, revision: p.revision}
 			p.refreshing = call
 			p.mu.Unlock()
 
+			ctx = withAcquisition(ctx, call.revision)
 			cred, session, restored, err := p.acquire(ctx, false)
-			p.finishRefresh(call, cred, session, restored, err)
-			return cred, err
+			return p.finishRefresh(call, cred, session, restored, err)
 		}
-		call.waiters++
 		p.mu.Unlock()
 		select {
 		case <-call.done:
@@ -242,43 +258,93 @@ func (p *Provider) Credential(ctx context.Context) (*Credential, error) {
 // queues the lifecycle event, so observers can never see "online" while
 // ActiveSDPC still returns nil. Events are queued under the lock (emit
 // never callbacks), then waiters are released.
-func (p *Provider) finishRefresh(call *refreshCall, cred *Credential, session *SessionInfo, restored bool, err error) {
+func (p *Provider) finishRefresh(call *refreshCall, cred *Credential, session *SessionInfo, restored bool, err error) (*Credential, error) {
 	p.mu.Lock()
+	active := call.revision == p.revision && !p.closed
+	if call.revision != p.revision {
+		err = ErrSessionReplaced
+	}
+	if p.closed {
+		err = context.Canceled
+	}
+	if call.leader != nil && call.leader.Err() != nil {
+		err = call.leader.Err()
+	}
 	if err == nil {
+		p.forceLogin = false
+		if p.cancelSession != nil {
+			p.cancelSession()
+		}
+		cred.Lifetime, p.cancelSession = context.WithCancel(context.Background())
+		p.generation++
+		cred.Generation = p.generation
+		session.Generation = p.generation
 		p.cur = cred
 		if restored {
 			p.emit(Event{Kind: EventRestoreOK, Session: session, Message: "已恢复会话：" + session.DisplayName})
 		} else {
 			p.emit(Event{Kind: EventLoginSuccess, Session: session, Message: "会话已建立：" + session.DisplayName})
 		}
-	} else {
-		p.emit(Event{Kind: EventLoginFailed, Message: SanitizeErrorText(err.Error())})
+	} else if active {
+		kind := EventLoginFailed
+		if errors.Is(err, auth.ErrInteractionRequired) {
+			kind = EventInteractionRequired
+		}
+		p.emit(Event{Kind: kind, Message: SanitizeErrorText(err.Error())})
 	}
 	p.refreshing = nil
 	p.mu.Unlock()
+	if err != nil {
+		cred = nil
+	}
 	call.cred, call.err = cred, err
 	close(call.done)
+	return cred, err
 }
 
 // ForceLogin performs a full login, bypassing any persisted session (used by
-// the `login -fresh` command). It waits out any in-flight refresh first so
-// the forced acquisition cannot be shadowed by a stale restore.
+// the `login -fresh` command). Concurrent forced logins share one acquisition;
+// an ordinary restore must finish before a forced acquisition starts.
 func (p *Provider) ForceLogin(ctx context.Context) (*Credential, error) {
 	for {
-		p.mu.Lock()
-		call := p.refreshing
-		p.mu.Unlock()
-		if call == nil {
-			break
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
+		p.mu.Lock()
+		if err := ctx.Err(); err != nil {
+			p.mu.Unlock()
+			return nil, err
+		}
+		if p.closed {
+			p.mu.Unlock()
+			return nil, context.Canceled
+		}
+		call := p.refreshing
+		if call == nil {
+			p.invalidateLocked()
+			call = &refreshCall{done: make(chan struct{}), leader: ctx, revision: p.revision, forced: true}
+			p.refreshing = call
+			p.mu.Unlock()
+			ctx = withAcquisition(ctx, call.revision)
+			cred, session, _, err := p.acquire(ctx, true)
+			return p.finishRefresh(call, cred, session, false, err)
+		}
+		p.mu.Unlock()
 		select {
 		case <-call.done:
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			if call.forced {
+				if call.err != nil && call.leader != nil && call.leader.Err() != nil && errors.Is(call.err, call.leader.Err()) {
+					continue
+				}
+				return call.cred, call.err
+			}
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		}
 	}
-	p.Invalidate()
-	return p.Credential(ctx)
 }
 
 // Invalidate drops the cached credential and marks the persisted session as
@@ -307,6 +373,11 @@ func (p *Provider) InvalidateIfCurrent(expected *Credential) bool {
 // clearSessionLocked drops the current credential and queues the
 // invalidated event without touching forceLogin. Callers must hold p.mu.
 func (p *Provider) clearSessionLocked() {
+	p.revision++
+	if p.cancelSession != nil {
+		p.cancelSession()
+		p.cancelSession = nil
+	}
 	p.cur = nil
 	p.emit(Event{Kind: EventInvalidated, Message: "会话已失效"})
 }
@@ -329,15 +400,17 @@ func (p *Provider) invalidateLocked() {
 func (p *Provider) TryForceRelogin() (run func(context.Context), ok bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.refreshing != nil {
+	if p.closed || p.refreshing != nil {
 		return nil, false
 	}
-	call := &refreshCall{done: make(chan struct{})}
+	p.clearSessionLocked()
+	call := &refreshCall{done: make(chan struct{}), revision: p.revision, forced: true}
 	p.refreshing = call
-	if p.cur != nil {
-		p.clearSessionLocked()
-	}
 	return func(ctx context.Context) {
+		p.mu.Lock()
+		call.leader = ctx
+		p.mu.Unlock()
+		ctx = withAcquisition(ctx, call.revision)
 		cred, session, _, err := p.acquire(ctx, true)
 		p.finishRefresh(call, cred, session, false, err)
 	}, true
@@ -357,9 +430,7 @@ func (p *Provider) CheckLoop(ctx context.Context, interval time.Duration) {
 			return
 		case <-ticker.C:
 		}
-		p.mu.Lock()
-		cred, sc := p.cur, p.sdpc
-		p.mu.Unlock()
+		cred, sc := p.ActiveSession()
 		if cred == nil || sc == nil {
 			continue
 		}
@@ -383,7 +454,7 @@ func (p *Provider) CheckLoop(ctx context.Context, interval time.Duration) {
 			continue
 		}
 		refreshCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
-		_, refreshErr := p.Credential(refreshCtx)
+		_, refreshErr := p.Credential(WithInteraction(refreshCtx, false))
 		cancel()
 		if err := refreshErr; err != nil {
 			p.logger.Error("silent re-login failed", "err", err)
@@ -395,21 +466,29 @@ func (p *Provider) CheckLoop(ctx context.Context, interval time.Duration) {
 
 // acquire restores the persisted session or performs a full login. force
 // (relogin reservation) skips restore regardless of the global flag. After
-// Invalidate, the restore step is skipped once: the persisted session is
-// the one the caller rejected.
+// Invalidate, the persisted session stays disabled until a new login succeeds.
 func (p *Provider) acquire(ctx context.Context, force bool) (*Credential, *SessionInfo, bool, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, nil, false, err
 	}
 	p.mu.Lock()
-	skipRestore := force || p.forceLogin
-	p.forceLogin = false
+	if err := p.checkAcquisitionLocked(ctx); err != nil {
+		p.mu.Unlock()
+		return nil, nil, false, err
+	}
+	if force {
+		p.forceLogin = true
+	}
+	skipRestore := p.forceLogin
 	p.mu.Unlock()
 
 	if !skipRestore {
 		if cred, session, err := p.restore(ctx); err != nil {
 			if ctx.Err() != nil {
 				return nil, nil, false, ctx.Err()
+			}
+			if errors.Is(err, ErrStateStorage) {
+				return nil, nil, false, err
 			}
 			p.logger.Warn("restoring persisted session failed; performing full login", "err", err)
 		} else if cred != nil {
@@ -420,7 +499,15 @@ func (p *Provider) acquire(ctx context.Context, force bool) (*Credential, *Sessi
 	if err := ctx.Err(); err != nil {
 		return nil, nil, false, err
 	}
-	p.emit(Event{Kind: EventLoginStart, Message: "开始完整登录"})
+	p.mu.Lock()
+	err := p.checkAcquisitionLocked(ctx)
+	if err == nil {
+		p.emit(Event{Kind: EventLoginStart, Message: "开始完整登录"})
+	}
+	p.mu.Unlock()
+	if err != nil {
+		return nil, nil, false, err
+	}
 	cred, session, err := p.login(ctx)
 	return cred, session, false, err
 }
@@ -428,9 +515,18 @@ func (p *Provider) acquire(ctx context.Context, force bool) (*Credential, *Sessi
 // restore validates the persisted state via onlineInfo and rebuilds the
 // routing policy. Returns (nil, nil, nil) when there is nothing to restore.
 func (p *Provider) restore(ctx context.Context) (*Credential, *SessionInfo, error) {
+	if p.store == nil {
+		return nil, nil, nil
+	}
 	st, err := p.store.Load(ctx)
-	if err != nil || st == nil {
-		return nil, nil, err
+	if err != nil {
+		return nil, nil, fmt.Errorf("%w: %w", ErrStateStorage, err)
+	}
+	if st == nil {
+		return nil, nil, nil
+	}
+	if st.ControllerURL != p.cfg.BaseURL || st.IdentityIssuer != p.cfg.IdentityIssuer || st.IdentitySubject != p.cfg.IdentitySubject || st.IdentityKind != p.cfg.IdentityKind || st.LoginDomain != p.cfg.LoginDomain {
+		return nil, nil, nil
 	}
 	if st.SID == "" || len(st.Cookies) == 0 {
 		return nil, nil, nil
@@ -454,7 +550,7 @@ func (p *Provider) restore(ctx context.Context) (*Credential, *SessionInfo, erro
 	}
 
 	jar, _ := cookiejar.New(nil)
-	hc := &http.Client{Jar: jar, Timeout: 30 * time.Second, Transport: p.Transport}
+	hc := &http.Client{Jar: jar, Timeout: p.httpTimeout(), Transport: p.Transport}
 	sc := p.newSDPC(hc)
 	cookies := make([]*http.Cookie, 0, len(st.Cookies))
 	for _, rec := range st.Cookies {
@@ -467,13 +563,14 @@ func (p *Provider) restore(ctx context.Context) (*Credential, *SessionInfo, erro
 	if err != nil {
 		return nil, nil, fmt.Errorf("onlineInfo: %w", err)
 	}
-	if !info.IsOnline {
-		return nil, nil, errors.New("persisted session is offline")
+	if !info.IsOnline || st.Username != info.Username {
+		return nil, nil, nil
 	}
-	cred, err := p.finishLogin(ctx, sc, st.Gateways, info.Username)
+	cred, err := p.finishLogin(ctx, sc, info.Username)
 	if err != nil {
 		return nil, nil, err
 	}
+	cred.DisplayName = info.DisplayName
 	p.logger.Info("session online", "user", info.Username, "display_name", info.DisplayName)
 	return cred, newSessionInfo(info, cred, p.cfg.ClientType), nil
 }
@@ -485,6 +582,7 @@ func (p *Provider) restore(ctx context.Context) (*Credential, *SessionInfo, erro
 func (p *Provider) newSDPC(hc *http.Client) *sdpc.Client {
 	sc := sdpc.NewClient(p.cfg.BaseURL, p.cfg.Platform, p.cfg.DeviceID, hc)
 	sc.LoginDomain = p.cfg.LoginDomain
+	sc.DomainMapping = p.cfg.DomainMapping
 	if p.cfg.ClientType == "client" {
 		sc.ClientType = sdpc.ClientTypeDesktop
 	}
@@ -513,25 +611,16 @@ func (p *Provider) login(ctx context.Context) (*Credential, *SessionInfo, error)
 // (→ SMS when requested) → session exchange → clientResource.
 func (p *Provider) loginOnce(ctx context.Context) (*Credential, *SessionInfo, error) {
 	jar, _ := cookiejar.New(nil)
-	hc := &http.Client{Jar: jar, Timeout: 30 * time.Second, Transport: p.Transport}
+	hc := &http.Client{Jar: jar, Timeout: p.httpTimeout(), Transport: p.Transport}
 	authenticate := p.Authenticate
 	if authenticate == nil {
-		authenticate = func(ctx context.Context, hc *http.Client) (string, error) {
-			ks, err := idsauth.LoadKeystore(p.cfg.Keystore)
-			if err != nil {
-				return "", err
-			}
-			if err = idsauth.NewClient(ks, hc).Login(ctx); err != nil {
-				return "", err
-			}
-			return ks.Username(), nil
-		}
+		return nil, nil, errors.New("identity authenticator required")
 	}
 	if _, err := authenticate(ctx, hc); err != nil {
-		return nil, nil, fmt.Errorf("identity authentication: %w", err)
+		return nil, nil, fmt.Errorf("%w: %w", ErrIdentityAuthentication, err)
 	}
 	sc := p.newSDPC(hc)
-	ac, err := sc.AuthConfig(ctx)
+	ac, err := sc.AuthConfig(ctx, true)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -572,27 +661,18 @@ func (p *Provider) loginOnce(ctx context.Context) (*Credential, *SessionInfo, er
 	}
 	p.logger.Info("session established", "user", info.Username, "display_name", info.DisplayName)
 
-	// On the desktop path the session is in client mode: bind this device
-	// as a trusted terminal so subsequent full logins may skip SMS. The
-	// browser path cannot bind (server rejects with 75500000).
-	if needSMS && sc.ClientType == sdpc.ClientTypeDesktop {
-		if err := sc.TrustDevice(ctx); err != nil {
-			p.logger.Warn("trust device binding failed; SMS will be required on next full login", "err", err)
-		} else {
-			p.logger.Info("device bound as trusted terminal")
-		}
-	}
-	cred, err := p.finishLogin(ctx, sc, nil, info.Username)
+	cred, err := p.finishLogin(ctx, sc, info.Username)
 	if err != nil {
 		return nil, nil, err
 	}
+	cred.DisplayName = info.DisplayName
 	return cred, newSessionInfo(info, cred, p.cfg.ClientType), nil
 }
 
 // smsFlow completes controller-requested SMS verification.
 func (p *Provider) smsFlow(ctx context.Context, sc *sdpc.Client) (string, error) {
-	if p.smsHandler == nil && p.prompt == nil {
-		return "", errors.New("the controller requires SMS verification, but no prompt is available")
+	if !InteractionAllowed(ctx) || (p.smsHandler == nil && p.prompt == nil && p.ChallengeHandler == nil) {
+		return "", &auth.RequiredError{Challenge: auth.Challenge{Info: auth.ChallengeInfo{Method: auth.SMS}}}
 	}
 	if err := sc.SendSMS(ctx); err != nil {
 		// 75500401: a code was already sent and is still valid — verify it
@@ -605,11 +685,18 @@ func (p *Provider) smsFlow(ctx context.Context, sc *sdpc.Client) (string, error)
 	}
 	var code string
 	var promptErr error
-	if p.smsHandler != nil {
+	if p.ChallengeHandler != nil {
+		deadline, _ := ctx.Deadline()
+		return p.challengeFlow(ctx, sc, deadline)
+	} else if p.smsHandler != nil {
 		// Keep typed controller errors for the web layer. An expired auth
 		// session also carries the private restart marker consumed by login.
-		resendFn := func(ctx context.Context) error {
-			err := sc.SendSMS(ctx)
+		authenticationCtx := ctx
+		resendFn := func(parent context.Context) error {
+			call, cancel := context.WithCancel(parent)
+			stop := context.AfterFunc(authenticationCtx, cancel)
+			defer func() { stop(); cancel() }()
+			err := sc.SendSMS(call)
 			if sdpc.IsSessionExpired(err) {
 				return fmt.Errorf("%w: resend SMS: %w", errSMSAuthSessionExpired, err)
 			}
@@ -633,8 +720,8 @@ func (p *Provider) smsFlow(ctx context.Context, sc *sdpc.Client) (string, error)
 }
 
 // finishLogin pulls clientResource, assembles the Credential and persists the
-// state file. gatewaysOverride comes from the persisted state (if any).
-func (p *Provider) finishLogin(ctx context.Context, sc *sdpc.Client, gatewaysOverride []string, username string) (*Credential, error) {
+// state file. Routing always uses the current policy and explicit configuration.
+func (p *Provider) finishLogin(ctx context.Context, sc *sdpc.Client, username string) (*Credential, error) {
 	res, err := sc.ClientResource(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("clientResource: %w", err)
@@ -642,57 +729,78 @@ func (p *Provider) finishLogin(ctx context.Context, sc *sdpc.Client, gatewaysOve
 	p.logger.Info("resource policy loaded",
 		"domain_rules", len(res.DomainRules), "suffix_rules", len(res.SuffixRules), "ip_rules", len(res.IPRules))
 	gateways := p.cfg.Gateways
-	if len(gateways) == 0 {
+	if !p.cfg.GatewayFilter && !p.cfg.LegacyGatewayOverride {
 		gateways = res.Gateways
 	}
-	if len(gateways) == 0 && len(gatewaysOverride) > 0 {
-		gateways = gatewaysOverride
-	}
-	if len(gateways) == 0 && p.cfg.IsShanghaiTech() {
-		gateways = []string{"119.78.254.241:441", "59.78.171.241:441"}
+	if len(gateways) == 0 && !p.cfg.GatewayFilter {
+		gateways = append([]string(nil), p.cfg.Fallbacks.Gateways...)
 	}
 	if len(gateways) == 0 {
 		return nil, fmt.Errorf("controller supplied no gateway addresses")
 	}
+	if p.cfg.GatewayFilter {
+		candidates := res.Gateways
+		if len(candidates) == 0 {
+			candidates = p.cfg.Fallbacks.Gateways
+		}
+		gateways = nil
+		for _, candidate := range candidates {
+			for _, allowed := range p.cfg.Gateways {
+				if candidate == allowed {
+					gateways = append(gateways, candidate)
+					break
+				}
+			}
+		}
+	}
+	if len(gateways) == 0 {
+		return nil, errors.New("no usable gateway remains after filtering")
+	}
 	dns := p.cfg.DNS
-	if len(dns) == 0 {
+	if !p.cfg.DNSConfigured && len(dns) == 0 {
 		dns = res.DNS
 	}
 
 	cred := &Credential{
-		AppID:           p.cfg.AppID,
-		LegacyRouting:   p.cfg.IsShanghaiTech(),
-		GatewayOverride: len(p.cfg.Gateways) != 0,
-		SID:             sc.SID(),
-		DeviceID:        p.cfg.DeviceID,
-		Username:        username,
-		ConnectionID:    fmt.Sprintf("%X-%d", md5.Sum([]byte(p.cfg.DeviceID)), time.Now().UnixMicro()),
-		CsrfToken:       sc.CSRF(),
-		Cookies:         sc.Cookies(),
-		Gateways:        gateways,
-		DNS:             dns,
-		Policy:          res,
+		controller:                  sc,
+		LegacyGatewayOverride:       p.cfg.LegacyGatewayOverride,
+		ProcessIdentity:             p.cfg.Process,
+		AppID:                       p.cfg.Fallbacks.ApplicationID,
+		MissingGatewayGroupFallback: p.cfg.Fallbacks.MissingGatewayGroup,
+		AllowTCPFallback:            p.cfg.Fallbacks.StreamToL3,
+		GatewayOverride:             p.cfg.GatewayFilter,
+		SID:                         sc.SID(),
+		DeviceID:                    p.cfg.DeviceID,
+		Username:                    username,
+		ConnectionID:                fmt.Sprintf("%X-%d", md5.Sum([]byte(p.cfg.DeviceID)), time.Now().UnixMicro()),
+		CsrfToken:                   sc.CSRF(),
+		Cookies:                     sc.Cookies(),
+		Gateways:                    gateways,
+		DNS:                         dns,
+		Policy:                      res,
 	}
 
 	records := make([]CookieRecord, 0, len(cred.Cookies))
 	for _, ck := range cred.Cookies {
 		records = append(records, CookieRecord{Name: ck.Name, Value: ck.Value})
 	}
-	if err := p.store.Save(ctx, &State{
-		SID:        cred.SID,
-		DeviceID:   cred.DeviceID,
-		CsrfToken:  cred.CsrfToken,
-		Cookies:    records,
-		Gateways:   cred.Gateways,
-		ClientType: p.cfg.ClientType,
-	}); err != nil {
-		// Credentials are live; persistence failure should not abort the login.
-		p.logger.Error("failed to persist session state", "err", err)
+	if p.store != nil {
+		if err := p.store.Save(ctx, &State{
+			SavedAt: time.Now(), Version: 1, ControllerURL: p.cfg.BaseURL, IdentityIssuer: p.cfg.IdentityIssuer, IdentitySubject: p.cfg.IdentitySubject, IdentityKind: p.cfg.IdentityKind, LoginDomain: p.cfg.LoginDomain, Username: username,
+			SID:        cred.SID,
+			DeviceID:   cred.DeviceID,
+			CsrfToken:  cred.CsrfToken,
+			Cookies:    records,
+			Gateways:   cred.Gateways,
+			ClientType: p.cfg.ClientType,
+		}); err != nil {
+			return nil, fmt.Errorf("%w: %w", ErrStateStorage, err)
+		}
 	}
 
-	p.mu.Lock()
-	p.sdpc = sc
-	p.mu.Unlock()
+	if err := p.CheckAcquisition(ctx); err != nil {
+		return nil, err
+	}
 	return cred, nil
 }
 

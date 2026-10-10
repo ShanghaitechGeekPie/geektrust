@@ -14,8 +14,8 @@ import (
 	"testing"
 	"time"
 
-	"geektrust/internal/config"
-	"geektrust/internal/resolver"
+	"github.com/ShanghaitechGeekPie/geektrust/internal/config"
+	"github.com/ShanghaitechGeekPie/geektrust/internal/resolver"
 )
 
 // mockDialer echoes everything it receives, proving end-to-end relay.

@@ -15,15 +15,18 @@ func TestAmbiguousCASDomainDoesNotChangeSelection(t *testing.T) {
 	defer server.Close()
 	c := NewClient(server.URL, "Mac", "synthetic-device", server.Client())
 	for i := 0; i < 2; i++ {
-		if _, err := c.AuthConfig(context.Background()); err == nil {
+		if _, err := c.AuthConfig(context.Background(), true); err == nil {
 			t.Fatal("ambiguous CAS selection accepted")
 		}
 		if c.LoginDomain != "" {
 			t.Fatal("failed discovery changed the selected domain")
 		}
 	}
+	if _, err := c.AuthConfig(context.Background(), false); err != nil {
+		t.Fatal("custom controller login must not require CAS domain selection:", err)
+	}
 	c.LoginDomain = "explicit"
-	if _, err := c.AuthConfig(context.Background()); err != nil {
+	if _, err := c.AuthConfig(context.Background(), true); err != nil {
 		t.Fatal(err)
 	}
 	if c.LoginDomain != "explicit" {

@@ -17,10 +17,10 @@ import (
 	"testing"
 	"time"
 
-	"geektrust/internal/frame"
-	"geektrust/internal/sdpc"
-	"geektrust/internal/session"
-	"geektrust/internal/tunnel"
+	"github.com/ShanghaitechGeekPie/geektrust/internal/frame"
+	"github.com/ShanghaitechGeekPie/geektrust/internal/sdpc"
+	"github.com/ShanghaitechGeekPie/geektrust/internal/session"
+	"github.com/ShanghaitechGeekPie/geektrust/internal/tunnel"
 )
 
 type flowSessionProvider struct {

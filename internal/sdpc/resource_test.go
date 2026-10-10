@@ -313,3 +313,58 @@ func TestAPIErrorSessionExpired(t *testing.T) {
 		}
 	}
 }
+
+func TestExplicitGenericLeavesDomainAddressUninferred(t *testing.T) {
+	var envelope struct {
+		Data json.RawMessage `json:"data"`
+	}
+	if e := json.Unmarshal([]byte(sampleResource), &envelope); e != nil {
+		t.Fatal(e)
+	}
+	var raw clientResource
+	if e := json.Unmarshal(envelope.Data, &raw); e != nil {
+		t.Fatal(e)
+	}
+	c := NewClient("https://vpn.shanghaitech.edu.cn", "Mac", "id", nil)
+	disabled := false
+	c.DomainMapping = &disabled
+	v := c.parseResource(&raw)
+	rule, ok := v.MatchDomainProtocol("library.shanghaitech.edu.cn", 443, "tcp")
+	if !ok || rule.IP != "" {
+		t.Fatal("generic compatibility inherited a school IP mapping")
+	}
+	enabled := true
+	c.DomainMapping = &enabled
+	v = c.parseResource(&raw)
+	rule, ok = v.MatchDomainProtocol("library.shanghaitech.edu.cn", 443, "tcp")
+	if !ok || rule.IP != "10.15.45.163" {
+		t.Fatal("verified school mapping lost")
+	}
+}
+
+func TestResourceKeepsHyphenatedDomainsAndIPRanges(t *testing.T) {
+	var raw clientResource
+	data := `{"appList":{"data":{"appInfo":[{"apps":[{"id":"resource","addressList":[{"host":"research-data.example.edu.cn","port":"443","protocol":"tcp"},{"host":"10.0.0.10-10.0.0.20","port":"443","protocol":"tcp"},{"host":"10.0.0.9","port":"443","protocol":"tcp"}]}]}]}}}`
+	if err := json.Unmarshal([]byte(data), &raw); err != nil {
+		t.Fatal(err)
+	}
+	for _, controller := range []string{"https://vpn.example.edu.cn", "https://vpn.shanghaitech.edu.cn"} {
+		t.Run(controller, func(t *testing.T) {
+			res := (&Client{BaseURL: controller}).parseResource(&raw)
+			rule, ok := res.MatchDomain("RESEARCH-DATA.example.edu.cn.", 443)
+			if !ok || rule.AppID != "resource" {
+				t.Fatalf("hyphenated domain lost: %+v, %v", rule, ok)
+			}
+			if _, ok := res.MatchDomain("research-data.example.edu.cn", 80); ok {
+				t.Fatal("domain port authorization widened")
+			}
+			if _, ok := res.MatchDomainProtocol("research-data.example.edu.cn", 443, "udp"); ok {
+				t.Fatal("domain protocol authorization widened")
+			}
+			ip, ok := res.MatchIP(net.ParseIP("10.0.0.15"), 443)
+			if !ok || ip.IPMin == nil || ip.IPMax == nil {
+				t.Fatal("IPv4 range no longer matched")
+			}
+		})
+	}
+}

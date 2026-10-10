@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"net"
 	"time"
+
+	"github.com/ShanghaitechGeekPie/geektrust/compatibility"
 )
 
 const (
@@ -70,7 +72,7 @@ var procFingerprint = fmt.Sprintf("%X", sha256.Sum256([]byte(procPath)))
 
 // buildAuthRequestIP serializes a per-flow auth body. domain is the original
 // hostname for wildcard-authorized targets (empty otherwise).
-func buildAuthRequestIP(sid, appID, deviceID, dstIP string, dstPort int, vip net.IP, srcPort uint16, conntrackHash uint64, domain string, protocol int) ([]byte, error) {
+func buildAuthRequestIP(sid, appID, deviceID, dstIP string, dstPort int, vip net.IP, srcPort uint16, conntrackHash uint64, domain string, protocol int, identity *compatibility.ProcessMetadata) ([]byte, error) {
 	network, err := protocolName(protocol)
 	if err != nil {
 		return nil, err
@@ -86,6 +88,13 @@ func buildAuthRequestIP(sid, appID, deviceID, dstIP string, dstPort int, vip net
 	p.Fingerprint = procFingerprint
 	p.Description = "TrustAppClosed"
 	p.Path = procPath
+	if identity != nil {
+		if err := (compatibility.Options{Protocol: compatibility.ProtocolOptions{Process: identity}}).Validate(); err != nil {
+			return nil, err
+		}
+		p.Name, p.Platform, p.Path = identity.Name, identity.Platform, identity.Path
+		p.Fingerprint = fmt.Sprintf("%X", sha256.Sum256([]byte(p.Path)))
+	}
 	p.Version = "TrustAppClosed"
 	p.SecurityEnv = "normal"
 	env.Application.Runtime.ProcessTrusted = "TRUSTED"
@@ -108,7 +117,7 @@ func buildAuthRequestIP(sid, appID, deviceID, dstIP string, dstPort int, vip net
 			SrcPort:  int(srcPort),
 		},
 		Domain:      domain,
-		ProcHash:    procFingerprint,
+		ProcHash:    p.Fingerprint,
 		XRequestSig: "",
 	}
 	return json.Marshal(req)

@@ -2,6 +2,7 @@ package tunnel
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -41,7 +42,7 @@ func TestBestRequiresGatewayTLS(t *testing.T) {
 	roots := x509.NewCertPool()
 	roots.AddCert(tlsServer.Certificate())
 	lines.TLSConfig = &tls.Config{RootCAs: roots}
-	got, err := lines.Best(ctx)
+	got, err := lines.bestForTest(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,7 +62,7 @@ func TestGatewayTLSRejectsUntrustedCertificateByDefault(t *testing.T) {
 	addr := strings.TrimPrefix(server.URL, "https://")
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	if _, err := NewLines([]string{addr}).Best(ctx); err == nil {
+	if _, err := NewLines([]string{addr}).bestForTest(ctx); err == nil {
 		t.Fatal("untrusted gateway certificate was accepted")
 	}
 }
@@ -71,16 +72,14 @@ type testPinStore struct {
 	pins map[string][]byte
 }
 
-func (s *testPinStore) LoadPin(_ context.Context, addr string) ([]byte, error) {
+func (s *testPinStore) CheckOrEnroll(_ context.Context, addr, _ string, pin [32]byte) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return append([]byte(nil), s.pins[addr]...), nil
-}
-func (s *testPinStore) SavePin(_ context.Context, addr string, pin []byte) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.pins[addr] = append([]byte(nil), pin...)
-	return nil
+	if stored, ok := s.pins[addr]; ok {
+		return bytes.Equal(stored, pin[:]), nil
+	}
+	s.pins[addr] = append([]byte(nil), pin[:]...)
+	return true, nil
 }
 
 func TestGatewayTrustOnFirstUsePinsPublicKey(t *testing.T) {
@@ -91,17 +90,22 @@ func TestGatewayTrustOnFirstUsePinsPublicKey(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	newLines := func() *Lines { l := NewLines([]string{addr}); l.GatewayTrustStore = store; return l }
-	if _, err := newLines().Best(ctx); err != nil {
+	if _, err := newLines().bestForTest(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if pin, _ := store.LoadPin(ctx, addr); len(pin) != 32 {
+	store.mu.Lock()
+	length := len(store.pins[addr])
+	store.mu.Unlock()
+	if length != 32 {
 		t.Fatal("gateway public key was not persisted")
 	}
-	if _, err := newLines().Best(ctx); err != nil {
+	if _, err := newLines().bestForTest(ctx); err != nil {
 		t.Fatalf("matching gateway pin rejected: %v", err)
 	}
-	store.SavePin(ctx, addr, make([]byte, 32))
-	if _, err := newLines().Best(ctx); err == nil || !strings.Contains(err.Error(), "public key changed") {
+	store.mu.Lock()
+	store.pins[addr] = make([]byte, 32)
+	store.mu.Unlock()
+	if _, err := newLines().bestForTest(ctx); err == nil || !strings.Contains(err.Error(), "public key changed") {
 		t.Fatalf("changed gateway key accepted: %v", err)
 	}
 }
@@ -178,4 +182,12 @@ func TestAllLinesTriedIncludesRecentTLSFailures(t *testing.T) {
 	if lines.allLinesTried(tried) {
 		t.Fatal("expired TLS failure must be attempted again")
 	}
+}
+
+func (l *Lines) bestForTest(ctx context.Context) (string, error) {
+	conn, addr, err := l.DialTLS(ctx)
+	if conn != nil {
+		conn.Close()
+	}
+	return addr, err
 }

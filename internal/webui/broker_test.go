@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"geektrust/internal/sdpc"
+	"github.com/ShanghaitechGeekPie/geektrust/internal/sdpc"
 )
 
 type promptResult struct {
@@ -180,7 +180,7 @@ func TestBrokerResend(t *testing.T) {
 	recvPrompt(t, ch)
 }
 
-// TestBrokerResendSecondValidation forces a resend to arrive at the opMu
+// TestBrokerResendSecondValidation forces a resend to arrive at the opGate
 // gate while another resend holds it, then resolves the generation: the
 // waiting resend must fail its second validation without invoking the
 // closure.
@@ -200,29 +200,18 @@ func TestBrokerResendSecondValidation(t *testing.T) {
 
 	resendA := make(chan error, 1)
 	go func() { resendA <- b.Resend(context.Background(), gen) }()
-	<-entered // A holds the generation's opMu inside its closure
+	<-entered // A holds the generation's opGate inside its closure
 
-	// B queues behind opMu; the claim then resolves the generation.
+	// B queues behind opGate; the claim then resolves the generation.
 	resendB := make(chan error, 1)
+	queued := &queuedResendContext{Context: context.Background(), ready: make(chan struct{})}
 	go func() {
-		resendB <- b.Resend(context.Background(), gen)
+		resendB <- b.Resend(queued, gen)
 	}()
-	// Wait until B has passed its first validation and is queued on opMu.
-	deadline := time.Now().Add(3 * time.Second)
-	for {
-		b.mu.Lock()
-		var waiters int
-		if b.pending != nil {
-			waiters = b.pending.opWaiters
-		}
-		b.mu.Unlock()
-		if waiters == 1 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("resend B did not reach the opMu gate")
-		}
-		time.Sleep(2 * time.Millisecond)
+	select {
+	case <-queued.ready:
+	case <-time.After(3 * time.Second):
+		t.Fatal("resend did not reach its production wait")
 	}
 	if err := b.ClaimWeb("123456", gen); err != nil {
 		t.Fatalf("claim during resend = %v", err)
@@ -239,7 +228,7 @@ func TestBrokerResendSecondValidation(t *testing.T) {
 	}
 }
 
-// TestBrokerResendSerializesTeardown proves the opMu contract: with a
+// TestBrokerResendSerializesTeardown proves the opGate contract: with a
 // resend in flight, Prompt must not return the claimed code until the
 // resend closure finishes.
 func TestBrokerResendSerializesTeardown(t *testing.T) {
@@ -379,4 +368,15 @@ func TestBrokerExpiredResendOverridesConcurrentClaim(t *testing.T) {
 	if result := recvPrompt(t, ch); result.code != "" || !sdpc.IsSessionExpired(result.err) {
 		t.Fatalf("expired resend lost to concurrent code claim: %+v", result)
 	}
+}
+
+type queuedResendContext struct {
+	context.Context
+	once  sync.Once
+	ready chan struct{}
+}
+
+func (c *queuedResendContext) Done() <-chan struct{} {
+	c.once.Do(func() { close(c.ready) })
+	return c.Context.Done()
 }

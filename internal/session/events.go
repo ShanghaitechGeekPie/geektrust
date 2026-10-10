@@ -5,7 +5,7 @@ import (
 	"regexp"
 	"time"
 
-	"geektrust/internal/sdpc"
+	"github.com/ShanghaitechGeekPie/geektrust/internal/sdpc"
 )
 
 // EventKind identifies a session lifecycle event.
@@ -21,7 +21,10 @@ const (
 
 // SessionInfo is the credential-redacted session snapshot handed to
 // observers. It never contains SID, cookies or CSRF tokens.
+const EventInteractionRequired EventKind = "interaction_required"
+
 type SessionInfo struct {
+	Generation  uint64
 	Username    string
 	DisplayName string
 	ClientIP    string

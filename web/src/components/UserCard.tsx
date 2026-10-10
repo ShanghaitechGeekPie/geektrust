@@ -1,88 +1,72 @@
-import { useEffect, useRef, useState } from "react";
+import { ChevronRight } from "lucide-react";
+import { Card } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogTrigger,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import type { Snapshot } from "../types";
-
-function shortID(id: string): string {
-  return id.length > 20 ? `${id.slice(0, 8)}…${id.slice(-8)}` : id;
-}
-
-// legacyCopy is the fallback for browsers without the async clipboard API.
-function legacyCopy(text: string): boolean {
-  const ta = document.createElement("textarea");
-  ta.value = text;
-  ta.style.position = "fixed";
-  ta.style.opacity = "0";
-  document.body.appendChild(ta);
-  ta.select();
-  let ok = false;
-  try {
-    ok = document.execCommand("copy");
-  } catch {
-    ok = false;
-  }
-  ta.remove();
-  return ok;
-}
-
+import { CopyButton } from "./CopyButton";
 export function UserCard({ snap }: { snap: Snapshot }) {
-  const [copied, setCopied] = useState<"ok" | "fail" | null>(null);
-  const timer = useRef<number | undefined>(undefined);
-  useEffect(() => () => window.clearTimeout(timer.current), []);
-
-  const copy = async () => {
-    let ok: boolean;
-    try {
-      await navigator.clipboard.writeText(snap.device_id);
-      ok = true;
-    } catch {
-      ok = legacyCopy(snap.device_id);
-    }
-    setCopied(ok ? "ok" : "fail");
-    window.clearTimeout(timer.current);
-    timer.current = window.setTimeout(() => setCopied(null), 1600);
-  };
-
+  const name = snap.user?.display_name || snap.user?.username || "未登录";
   return (
-    <section className="card">
-      <h2>用户</h2>
-      {snap.user ? (
-        <dl className="kv">
-          <dt>账号</dt>
-          <dd>{snap.user.username}</dd>
-          <dt>姓名</dt>
-          <dd>{snap.user.display_name}</dd>
-          <dt>客户端 IP</dt>
-          <dd className="mono">{snap.user.client_ip}</dd>
-        </dl>
-      ) : (
-        <p className="muted">未登录</p>
-      )}
-      <dl className="kv">
-        <dt>device_id</dt>
-        <dd className="mono" title={snap.device_id}>
-          {shortID(snap.device_id)}
-          <button className="link" onClick={() => void copy()} title="复制完整 device_id">
-            {copied === "ok" ? "已复制" : copied === "fail" ? "复制失败" : "复制"}
-          </button>
-        </dd>
-        <dt>登录模式</dt>
-        <dd>{snap.client_type}</dd>
-        <dt>SOCKS5</dt>
-        <dd className="mono">{snap.proxy.socks5 ?? "已禁用"}</dd>
-        <dt>HTTP</dt>
-        <dd className="mono">{snap.proxy.http ?? "已禁用"}</dd>
-        {snap.gateways && snap.gateways.length > 0 && (
-          <>
-            <dt>网关</dt>
-            <dd className="mono">{snap.gateways.join(", ")}</dd>
-          </>
-        )}
-        {snap.dns && snap.dns.length > 0 && (
-          <>
-            <dt>隧道 DNS</dt>
-            <dd className="mono">{snap.dns.join(", ")}</dd>
-          </>
-        )}
+    <Card className="account-card">
+      <div className="flex min-w-0 items-center gap-3">
+        <div className="min-w-0">
+          <h2 className="truncate text-sm font-medium" title={name}>
+            {name}
+          </h2>
+          <p
+            className="truncate text-xs text-muted-foreground"
+            title={snap.controller_host}
+          >
+            {snap.controller_host || "控制器未配置"}
+          </p>
+        </div>
+      </div>
+      <dl className="account-fields">
+        <dt>账号</dt>
+        <dd>{snap.user?.username || "—"}</dd>
+        <dt>客户端 IP</dt>
+        <dd>{snap.user?.client_ip || "—"}</dd>
       </dl>
-    </section>
+      <Dialog>
+        <DialogTrigger asChild>
+          <Button variant="ghost" size="sm" className="mt-auto self-end">
+            查看详情
+            <ChevronRight />
+          </Button>
+        </DialogTrigger>
+        <DialogContent aria-describedby={undefined}>
+          <DialogHeader>
+            <DialogTitle>连接与设备详情</DialogTitle>
+          </DialogHeader>
+          <dl className="detail-fields">
+            <dt>控制器</dt>
+            <dd>{snap.controller_host || "—"}</dd>
+            <dt>设备 ID</dt>
+            <dd className="flex flex-wrap items-center gap-1">
+              <code className="break-all">{snap.device_id}</code>
+              <CopyButton value={snap.device_id} label="复制设备 ID" />
+            </dd>
+            <dt>登录模式</dt>
+            <dd>{snap.client_type}</dd>
+            <dt>状态更新时间</dt>
+            <dd>
+              {Number.isNaN(Date.parse(snap.since))
+                ? snap.since
+                : new Date(snap.since).toLocaleString("zh-CN")}
+            </dd>
+            <dt>网关</dt>
+            <dd className="font-mono">{snap.gateways?.join(", ") || "—"}</dd>
+            <dt>隧道 DNS</dt>
+            <dd className="font-mono">{snap.dns?.join(", ") || "—"}</dd>
+          </dl>
+        </DialogContent>
+      </Dialog>
+    </Card>
   );
 }
