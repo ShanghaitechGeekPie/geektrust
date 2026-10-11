@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"mime"
 	"net/http/httptest"
 	"strings"
 	"sync"
@@ -32,6 +33,8 @@ func gzipAsset(t *testing.T, data []byte) []byte {
 func TestCompressedAssetsPreserveHTTPBehavior(t *testing.T) {
 	html := "<!doctype html><div id=\"root\"></div>"
 	script := "console.log('the original JavaScript');"
+	// Go uses the host MIME database, including the Windows registry.
+	javascriptType := mime.TypeByExtension(".js")
 	font := []byte("wOF2 unchanged font")
 	modified := time.Date(2025, 1, 2, 3, 4, 5, 0, time.UTC)
 	files := fstest.MapFS{
@@ -45,9 +48,9 @@ func TestCompressedAssetsPreserveHTTPBehavior(t *testing.T) {
 		status                                                      int
 	}{
 		{"index", "GET", "/", "", "", html, "text/html", "no-cache", 200},
-		{"script", "GET", "/assets/panel.js", "", "", script, "text/javascript", "public, max-age=31536000, immutable", 200},
-		{"head", "HEAD", "/assets/panel.js", "", "", "", "text/javascript", "public, max-age=31536000, immutable", 200},
-		{"range", "GET", "/assets/panel.js", "Range", "bytes=7-12", script[7:13], "text/javascript", "public, max-age=31536000, immutable", 206},
+		{"script", "GET", "/assets/panel.js", "", "", script, javascriptType, "public, max-age=31536000, immutable", 200},
+		{"head", "HEAD", "/assets/panel.js", "", "", "", javascriptType, "public, max-age=31536000, immutable", 200},
+		{"range", "GET", "/assets/panel.js", "Range", "bytes=7-12", script[7:13], javascriptType, "public, max-age=31536000, immutable", 206},
 		{"not modified", "GET", "/assets/panel.js", "If-Modified-Since", modified.Format("Mon, 02 Jan 2006 15:04:05 GMT"), "", "", "public, max-age=31536000, immutable", 304},
 		{"spa fallback", "GET", "/some/route", "", "", html, "text/html", "no-cache", 200},
 		{"font", "GET", "/assets/panel.woff2", "", "", string(font), "", "public, max-age=31536000, immutable", 200},
