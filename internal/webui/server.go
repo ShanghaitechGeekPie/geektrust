@@ -63,8 +63,8 @@ func NewServer(hub *Hub, broker *Broker, provider ProviderAPI, cfg *config.Confi
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &Server{hub: hub, broker: broker, provider: provider, cfg: cfg, lifetime: ctx, cancel: cancel}
 	if sub, err := fs.Sub(distFS, "dist"); err == nil {
-		s.dist = sub
-		if f, err := sub.Open("index.html"); err == nil {
+		s.dist = &assetFS{FS: sub}
+		if f, err := s.dist.Open("index.html"); err == nil {
 			f.Close()
 			s.hasUI = true
 		}

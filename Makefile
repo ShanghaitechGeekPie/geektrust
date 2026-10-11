@@ -1,6 +1,6 @@
 .PHONY: web build
 
-# Build the frontend into internal/webui/dist (requires Node 20+).
+# Build into web/dist and copy packed assets into internal/webui/dist (requires Node 20+).
 # The postbuild npm script restores dist/.gitkeep so plain `go build`
 # keeps working on clean checkouts.
 web:
