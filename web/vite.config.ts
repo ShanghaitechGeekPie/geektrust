@@ -2,13 +2,23 @@ import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import { fileURLToPath, URL } from "node:url";
+import { panelFonts } from "./build/fonts";
 
-export default defineConfig({
-  plugins: [react(), tailwindcss()],
-  resolve: { alias: { "@": fileURLToPath(new URL("./src", import.meta.url)) } },
+export default defineConfig(({ command }) => ({
+  plugins: [panelFonts(), react(), tailwindcss()],
+  resolve: {
+    alias: {
+      "@": fileURLToPath(new URL("./src", import.meta.url)),
+      "@panel-fonts": fileURLToPath(new URL(
+        `./.generated/${command === "serve" ? "fonts-dev" : "fonts"}/noto-sans-sc.css`,
+        import.meta.url,
+      )),
+    },
+  },
   build: {
     outDir: "../internal/webui/dist",
     emptyOutDir: true,
+    assetsInlineLimit: 0,
   },
   server: {
     proxy: {
@@ -26,4 +36,4 @@ export default defineConfig({
       },
     },
   },
-});
+}));

@@ -508,6 +508,7 @@ web/
 `vite.config.ts`：
 
 - `build.outDir = '../internal/webui/dist'`，`build.emptyOutDir = true`。
+- 发布构建自动从前端源码和 Go 后端消息收集固定字符，裁剪 Noto Sans SC 字形，保留可变字重、hinting 和排版特性。Geist 与 Geist Mono 保留完整字库；动态内容中未内置的字形使用现有系统字体回退。开发模式保留完整 Noto Sans SC 字库，新增文案不需要手动维护字符清单。开发与发布构建分别使用 `web/.generated/fonts-dev` 和 `web/.generated/fonts`，避免互相覆盖。
 - dev 代理必须兼容 §8 的 Host/Origin 校验（字符串简写会保留 5173 的 Host 与 Origin，导致全部请求 403）：
 
 ```ts
