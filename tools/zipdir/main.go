@@ -4,6 +4,7 @@ package main
 
 import (
 	"archive/zip"
+	"compress/flate"
 	"fmt"
 	"io"
 	"io/fs"
@@ -54,6 +55,9 @@ func zipDir(source, output string) (err error) {
 	}()
 
 	archive := zip.NewWriter(out)
+	archive.RegisterCompressor(zip.Deflate, func(writer io.Writer) (io.WriteCloser, error) {
+		return flate.NewWriter(writer, flate.BestCompression)
+	})
 	defer func() {
 		if closeErr := archive.Close(); err == nil {
 			err = closeErr
