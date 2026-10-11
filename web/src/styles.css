@@ -3,7 +3,7 @@
 @import "./shadcn.css";
 @import "@fontsource-variable/geist";
 @import "@fontsource-variable/geist-mono";
-@import "@fontsource-variable/noto-sans-sc";
+@import "@panel-fonts";
 
 @custom-variant dark (&:is(.dark *));
 @theme inline {

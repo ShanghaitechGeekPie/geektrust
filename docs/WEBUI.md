@@ -507,7 +507,8 @@ web/
 
 `vite.config.ts`：
 
-- `build.outDir = '../internal/webui/dist'`，`build.emptyOutDir = true`。
+- `build.outDir = 'dist'`，`build.emptyOutDir = true`。`web/dist` 保留原始资源供 Vite preview 使用；构建插件将资源复制到 `internal/webui/dist`，其中 HTML、JS、CSS 等文本按 gzip 压缩存储，字体保持 WOFF2。Go 的 `assetFS` 每个资源仅解压一次，每次打开提供独立读取位置，保留 MIME、HEAD、Range 和缓存行为。
+- 发布构建自动从前端源码和 Go 后端消息收集固定字符，裁剪 Noto Sans SC 字形，保留可变字重、hinting 和排版特性。Geist 与 Geist Mono 保留完整字库；动态内容中未内置的字形使用现有系统字体回退。开发模式保留完整 Noto Sans SC 字库，新增文案不需要手动维护字符清单。开发与发布构建分别使用 `web/.generated/fonts-dev` 和 `web/.generated/fonts`，避免互相覆盖。
 - dev 代理必须兼容 §8 的 Host/Origin 校验（字符串简写会保留 5173 的 Host 与 Origin，导致全部请求 403）：
 
 ```ts
@@ -536,7 +537,7 @@ build: web
 	go build -o geektrust ./cmd/geektrust
 ```
 
-`.gitkeep` 保全（关键）：Vite `emptyOutDir=true` 会删除被跟踪的 `dist/.gitkeep`；只靠 Makefile 的 touch 步骤无法约束直接执行 `npm run build` 的门槛，删除一旦被提交，干净检出的 `go build` 会因 embed 无匹配文件而失败。因此由 `web/package.json` 的 `postbuild` 脚本负责重建（npm 在 build 后自动执行，跨平台 Node 实现，不依赖 shell）：
+`.gitkeep` 保全：嵌入资源复制步骤保留既有的 `internal/webui/dist/.gitkeep`，缺失时创建，保证干净检出的 `go build` 有匹配的 embed 文件；`web/package.json` 的 `postbuild` 脚本也保留该文件（npm 在 build 后自动执行，跨平台 Node 实现，不依赖 shell）：
 
 ```json
 "scripts": {
@@ -547,7 +548,7 @@ build: web
 
 前端开发：`go run ./cmd/geektrust run`（终端 1）+ `npm --prefix web run dev`（终端 2，Vite 5173 端口）。不做进程编排。
 
-`internal/webui/dist` embed 规则：`//go:embed all:dist`（`all:` 前缀包含 `.gitkeep` 点文件，已核实可编译）；git 中只跟踪 `dist/.gitkeep`。`Server` 启动时检测 `index.html` 缺失则页面路由返回占位页（200，说明"前端未构建，运行 make web"），API 不受影响。`.gitignore` 增加 `web/node_modules/` 与 `internal/webui/dist/*`（`!internal/webui/dist/.gitkeep`）。
+`internal/webui/dist` embed 规则：`//go:embed all:dist`（`all:` 前缀包含 `.gitkeep` 点文件，已核实可编译）；git 中只跟踪 `dist/.gitkeep`。`Server` 启动时检测 `index.html` 和 `index.html.gz` 均缺失则页面路由返回占位页（200，说明"前端未构建，运行 make web"），API 不受影响。`.gitignore` 增加 `web/node_modules/`、`web/.generated/`、`web/dist/` 与 `internal/webui/dist/*`（`!internal/webui/dist/.gitkeep`）。
 
 ### 9.3 页面布局
 

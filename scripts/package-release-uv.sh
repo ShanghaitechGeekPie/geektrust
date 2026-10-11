@@ -130,7 +130,7 @@ for target in "${targets[@]}"; do
   if [[ "$goos" == windows ]]; then
     go run ./tools/zipdir "$package_dir" "$output_dir/$package_name.zip"
   else
-    tar -C "$work_dir" -czf "$output_dir/$package_name.tar.gz" "$package_name"
+    tar -C "$work_dir" -cf - "$package_name" | gzip -9 > "$output_dir/$package_name.tar.gz"
   fi
 done
 

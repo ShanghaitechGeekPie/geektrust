@@ -17,5 +17,7 @@
 
 # frontend
 web/node_modules/
+web/.generated/
+web/dist/
 internal/webui/dist/*
 !internal/webui/dist/.gitkeep
