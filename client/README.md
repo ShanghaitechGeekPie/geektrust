@@ -30,6 +30,8 @@ defer conn.Close()
 
 控制器兼容适配默认为 `compatibility.Auto`。上科大的已验证 TLS 身份和缺字段补充由内部适配提供；未知控制器采用 `Generic`。`Fallbacks=nil` 使用适配默认，`&compatibility.Fallbacks{}` 关闭全部兜底。TLS 设置放在 `Network.GatewayTLS`，正常 CA 验证成功时不强制检查 pin；未知 CA 的兜底需要原子的 `CheckOrEnroll`，并继续验证证书身份和有效期。
 
+`Network.GatewayTLS.Config.InsecureSkipVerify=true` 可显式跳过网关证书验证和 pin 检查，默认关闭；开启后无法通过证书确认网关身份。调用方提供的 TLS 验证回调仍会执行，控制器 HTTPS 不受此设置影响。
+
 SDK 默认仅使用控制器 DNS；额外来源由 `DNS.FallbackLookup` 明确提供。CLI 的 `auto` 顺序在命令转换层保留。`Network.AllowedGateways=nil` 不额外限制，显式空列表拒绝全部线路。`CheckTarget` 收到地址、协议、端口和代；`DNSQueryTarget` 区分基础 DNS 查询，只能收紧访问权限。
 
 `Status` 返回安全快照；`Subscribe(ctx)` 为每个订阅者提供独立有界队列，慢订阅者不会阻塞连接。`ImplementedCapabilities()` 表示 SDK 实现范围，不代表资源授权或目标连通。`ExchangeICMPEcho` 仅支持未分片 IPv4 Echo，UDP 保留数据报边界，payload 上限为 1372 字节。IPv6 目标未实现。

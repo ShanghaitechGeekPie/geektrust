@@ -109,9 +109,6 @@ func New(opts Options) (*Runtime, error) {
 	if (opts.Network.GatewayTLS.Mode == VerifyCAOrTOFU) != (opts.Network.GatewayTLS.PinStore != nil) {
 		return nil, errors.New("gateway pin store requires CA-or-TOFU mode")
 	}
-	if t := opts.Network.GatewayTLS.Config; t != nil && t.InsecureSkipVerify {
-		return nil, errors.New("gateway certificate verification cannot be disabled")
-	}
 	if opts.Logger == nil {
 		opts.Logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}

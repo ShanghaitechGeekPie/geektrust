@@ -59,8 +59,9 @@ type FileV2 struct {
 	} `toml:"logging"`
 	TLS struct {
 		Gateway struct {
-			ServerName string `toml:"server_name"`
-			CAFile     string `toml:"ca_file"`
+			ServerName         string `toml:"server_name"`
+			CAFile             string `toml:"ca_file"`
+			InsecureSkipVerify bool   `toml:"insecure_skip_verify"`
 		} `toml:"gateway"`
 	} `toml:"tls"`
 	Routing struct {
@@ -170,6 +171,7 @@ func loadV2(path string, data []byte) (*Config, error) {
 		cfg.GatewayTLSName = f.TLS.Gateway.ServerName
 	}
 	cfg.CAFile = resolve(f.TLS.Gateway.CAFile)
+	cfg.InsecureSkipVerify = f.TLS.Gateway.InsecureSkipVerify
 	socks, http, web := "127.0.0.1:1080", "127.0.0.1:8080", DefaultWebListen
 	if meta.IsDefined("proxy", "socks5", "listen") {
 		socks = f.Proxy.SOCKS5.Listen
@@ -314,6 +316,7 @@ func Migration(path string) ([]byte, error) {
 	f.Logging.Level = c.LogLevel
 	f.Routing.FallbackAppID = c.AppID
 	f.TLS.Gateway.ServerName = c.GatewayTLSName
+	f.TLS.Gateway.InsecureSkipVerify = c.InsecureSkipVerify
 	var b bytes.Buffer
 	e = toml.NewEncoder(&b).Encode(f)
 	return b.Bytes(), e

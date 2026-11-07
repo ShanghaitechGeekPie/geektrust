@@ -37,8 +37,8 @@ func commandClient(cfg *config.Config, logger *slog.Logger) (*runtime.Runtime, e
 	if cfg.ClientType == "client" {
 		o.Auth.Mode = runtime.DesktopMode
 	}
-	if cfg.GatewayTLSName != "" {
-		o.Network.GatewayTLS.Config = &tls.Config{ServerName: cfg.GatewayTLSName}
+	if cfg.GatewayTLSName != "" || cfg.InsecureSkipVerify {
+		o.Network.GatewayTLS.Config = &tls.Config{ServerName: cfg.GatewayTLSName, InsecureSkipVerify: cfg.InsecureSkipVerify}
 	}
 	if cfg.CAFile != "" {
 		b, e := os.ReadFile(cfg.CAFile)

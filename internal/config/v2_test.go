@@ -46,7 +46,7 @@ func TestV2StrictAndLegacyMigration(t *testing.T) {
 			t.Fatal("invalid v2 accepted")
 		}
 	}
-	old := "keystore='credential'\ndevice_id='0123456789ABCDEF0123456789ABCDEF'\nclient_type='browser'\napp_id='custom'\nunknown_old_key=true\n"
+	old := "keystore='credential'\ndevice_id='0123456789ABCDEF0123456789ABCDEF'\nclient_type='browser'\napp_id='custom'\ninsecure_skip_verify=true\nunknown_old_key=true\n"
 	os.WriteFile(p, []byte(old), 0600)
 	b, e := Migration(p)
 	if e != nil {
@@ -69,6 +69,9 @@ func TestV2StrictAndLegacyMigration(t *testing.T) {
 	}
 	if c.StateFile != expectedState {
 		t.Fatal("migration changed the effective session path")
+	}
+	if !c.InsecureSkipVerify {
+		t.Fatal("migration lost the gateway certificate verification setting")
 	}
 	if !strings.Contains(string(b), "0123456789ABCDEF0123456789ABCDEF") || !strings.Contains(string(b), "browser") || !strings.Contains(string(b), "custom") {
 		t.Fatal("migration lost existing semantics")

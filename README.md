@@ -98,11 +98,13 @@ config_version = 2
 keystore = "./ids-passkey.keystore"
 ```
 
-相对路径以配置文件目录为准。设备身份和加密会话放在平台用户持久目录；上科大必需的网关证书域名由程序提供，证书验证继续开启。普通用户无需填写应用 ID、网关 IP 或协议回退开关。
+相对路径以配置文件目录为准。设备身份和加密会话放在平台用户持久目录；上科大必需的网关证书域名由程序提供，默认开启证书验证。普通用户无需填写应用 ID、网关 IP 或协议回退开关。
 
 配置按 `controller`、`auth`、`proxy`、`web`、`dns`、`storage`、`logging` 分组。监听地址省略时采用默认值，空字符串表示禁用。`controller.compatibility` 选择 `auto`、`shanghaitech`、`ecnu` 或 `generic`；它用于控制器兼容适配。`auth.mode` 支持 `auto`、`client`、`browser`；browser 模式不能绑定授信终端。
 
 文件权限检查和设置问题默认输出英文警告。在 `[storage]` 中设置 `strict_permissions = true` 后，这些问题会阻止操作。新文件仍会尝试设置私有权限；文件内容的格式校验始终保留，实际读写失败仍会报错。旧格式使用顶层 `strict_permissions`，迁移时会保留该设置。
+
+在 `[tls.gateway]` 中设置 `insecure_skip_verify = true` 可跳过网关 TLS 证书验证，包括证书有效期、域名和 CA 检查。默认值为 `false`；开启后无法通过证书确认网关身份。该设置只影响网关隧道，控制器 HTTPS 仍验证证书。旧格式使用顶层 `insecure_skip_verify`，迁移时会保留该设置。
 
 旧格式继续可读，不自动重写。检查和迁移命令：
 

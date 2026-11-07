@@ -137,7 +137,7 @@ type GatewayTrustStore interface {
 
 func gatewayTLSConfigWithTrust(ctx context.Context, addr string, template *tls.Config, trust GatewayTrustStore) *tls.Config {
 	cfg := gatewayTLSConfigWithTemplate(addr, template)
-	if trust == nil {
+	if trust == nil || cfg.InsecureSkipVerify {
 		return cfg
 	}
 	previous := cfg.VerifyConnection

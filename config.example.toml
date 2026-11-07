@@ -35,10 +35,11 @@ keystore = "./ids-passkey.keystore"
 # [logging]
 # level = "info"
 
-# 高级设置只在实际部署需要时填写。证书验证始终开启。
+# 高级设置只在实际部署需要时填写。默认验证网关证书。
 # [tls.gateway]
 # server_name = ""
 # ca_file = ""
+# insecure_skip_verify = false # true 跳过网关证书验证，包括证书有效期和域名检查
 # [routing]
 # gateway_filter = [] # 显式空列表拒绝所有线路；省略不额外筛选
 # fallback_app_id = ""

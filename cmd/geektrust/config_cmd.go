@@ -35,7 +35,7 @@ func cmdConfig(path string, args []string) error {
 			fmt.Println("configuration valid")
 			return nil
 		}
-		fmt.Printf("config_version = %d\ncontroller = %q\ncompatibility = %q\nauth_mode = %q\ndns_strategy = %q\nkeystore = %q\nstate_file = %q\nstrict_permissions = %t\n", c.Version, c.BaseURL, c.Compatibility, c.ClientType, c.DNSStrategy, c.Keystore, c.StateFile, c.StrictPermissions)
+		fmt.Printf("config_version = %d\ncontroller = %q\ncompatibility = %q\nauth_mode = %q\ndns_strategy = %q\nkeystore = %q\nstate_file = %q\nstrict_permissions = %t\ninsecure_skip_verify = %t\n", c.Version, c.BaseURL, c.Compatibility, c.ClientType, c.DNSStrategy, c.Keystore, c.StateFile, c.StrictPermissions, c.InsecureSkipVerify)
 		return nil
 	case "migrate":
 		fs := flag.NewFlagSet("config migrate", flag.ContinueOnError)
