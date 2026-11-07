@@ -31,14 +31,15 @@ const DefaultWebListen = "127.0.0.1:8081"
 
 // Config is the top-level configuration.
 type Config struct {
-	UnknownFields     []string       `toml:"-"`
-	Version           int            `toml:"-"`
-	Compatibility     public.Profile `toml:"-"`
-	DNSStrategy       string         `toml:"-"`
-	Directory         string         `toml:"-"`
-	CAFile            string         `toml:"-"`
-	AppID             string         `toml:"app_id"`
-	StrictPermissions bool           `toml:"strict_permissions"`
+	UnknownFields      []string       `toml:"-"`
+	Version            int            `toml:"-"`
+	Compatibility      public.Profile `toml:"-"`
+	DNSStrategy        string         `toml:"-"`
+	Directory          string         `toml:"-"`
+	CAFile             string         `toml:"-"`
+	AppID              string         `toml:"app_id"`
+	StrictPermissions  bool           `toml:"strict_permissions"`
+	InsecureSkipVerify bool           `toml:"insecure_skip_verify"`
 
 	Fallbacks      public.Fallbacks `toml:"-"`
 	GatewayTLSName string           `toml:"-"`

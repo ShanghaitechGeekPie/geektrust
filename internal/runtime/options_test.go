@@ -74,7 +74,7 @@ func TestOptionsCopiedAndProfileDefaults(t *testing.T) {
 	o.Compatibility.Fallbacks.ApplicationID = "custom-app"
 	o.Compatibility.Fallbacks.Gateways = []string{"configured.example:441"}
 	o.DNS.Servers = []netip.Addr{netip.MustParseAddr("10.0.0.53")}
-	template := &tls.Config{ServerName: "gateway.example"}
+	template := &tls.Config{ServerName: "gateway.example", InsecureSkipVerify: true}
 	o.Network.GatewayTLS.Config = template
 	c, e := New(o)
 	if e != nil {
@@ -83,6 +83,7 @@ func TestOptionsCopiedAndProfileDefaults(t *testing.T) {
 	defer c.Close()
 	o.Compatibility.Fallbacks.Gateways[0] = "mutated.example:441"
 	template.ServerName = "mutated"
+	template.InsecureSkipVerify = false
 	info, e := c.Connect(context.Background())
 	if e != nil {
 		t.Fatal(e)
@@ -95,7 +96,7 @@ func TestOptionsCopiedAndProfileDefaults(t *testing.T) {
 		t.Fatal("application fallback lost")
 	}
 	_, sc := c.provider.ActiveSession()
-	if c.manager.GatewayTLSConfig.ServerName != "gateway.example" || sc.LoginDomain != "custom-domain" {
+	if c.manager.GatewayTLSConfig.ServerName != "gateway.example" || !c.manager.GatewayTLSConfig.InsecureSkipVerify || sc.LoginDomain != "custom-domain" {
 		t.Fatal("TLS/login settings lost")
 	}
 }

@@ -61,18 +61,21 @@ func TestCallbackRejectionDoesNotEnrollGatewayPin(t *testing.T) {
 	server := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	defer server.Close()
 	rejected := errors.New("caller rejected certificate")
-	config := &tls.Config{VerifyConnection: func(tls.ConnectionState) error { return rejected }}
-	pins := &testPinStore{pins: map[string][]byte{}}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	if conn, err := probeGatewayTLSWithDialer(ctx, strings.TrimPrefix(server.URL, "https://"), nil, config, pins); err == nil {
-		conn.Close()
-		t.Fatal("caller rejection was ignored")
-	} else if !errors.Is(err, rejected) {
-		t.Fatalf("callback error = %v", err)
-	}
-	if len(pins.pins) != 0 {
-		t.Fatal("a caller-rejected certificate was enrolled")
+	for _, skip := range []bool{false, true} {
+		config := &tls.Config{InsecureSkipVerify: skip, VerifyConnection: func(tls.ConnectionState) error { return rejected }}
+		pins := &testPinStore{pins: map[string][]byte{}}
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		conn, err := probeGatewayTLSWithDialer(ctx, strings.TrimPrefix(server.URL, "https://"), nil, config, pins)
+		cancel()
+		if err == nil {
+			conn.Close()
+			t.Fatal("caller rejection was ignored")
+		} else if !errors.Is(err, rejected) {
+			t.Fatalf("callback error = %v", err)
+		}
+		if len(pins.pins) != 0 {
+			t.Fatal("a caller-rejected certificate was enrolled")
+		}
 	}
 }
 
@@ -123,16 +126,41 @@ func TestCAOrTOFUHonorsConfiguredClock(t *testing.T) {
 	roots := x509.NewCertPool()
 	roots.AddCert(server.Certificate())
 	future := server.Certificate().NotAfter.Add(time.Hour)
-	config := &tls.Config{RootCAs: roots, Time: func() time.Time { return future }}
-	pins := &testPinStore{pins: map[string][]byte{}}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	conn, err := probeGatewayTLSWithDialer(ctx, strings.TrimPrefix(server.URL, "https://"), nil, config, pins)
-	if err == nil {
-		conn.Close()
-		t.Fatal("expired certificate was accepted under the configured clock")
-	}
-	if len(pins.pins) != 0 {
-		t.Fatal("expired certificate enrolled a fallback pin")
+	for _, tc := range []struct {
+		name       string
+		tofu, skip bool
+	}{
+		{"CA", false, false},
+		{"CA/skip", false, true},
+		{"CA-or-TOFU", true, false},
+		{"CA-or-TOFU/skip", true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			config := &tls.Config{RootCAs: roots, Time: func() time.Time { return future }, InsecureSkipVerify: tc.skip}
+			pins := &testPinStore{pins: map[string][]byte{}}
+			var trust GatewayTrustStore
+			if tc.tofu {
+				trust = pins
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			conn, err := probeGatewayTLSWithDialer(ctx, strings.TrimPrefix(server.URL, "https://"), nil, config, trust)
+			if conn != nil {
+				conn.Close()
+			}
+			if tc.skip {
+				if err != nil {
+					t.Fatalf("explicit certificate verification bypass failed: %v", err)
+				}
+			} else {
+				var invalid x509.CertificateInvalidError
+				if !errors.As(err, &invalid) || invalid.Reason != x509.Expired {
+					t.Fatalf("expected expired certificate rejection, got %v", err)
+				}
+			}
+			if len(pins.pins) != 0 {
+				t.Fatal("expired certificate enrolled a fallback pin")
+			}
+		})
 	}
 }
